@@ -173,6 +173,10 @@ class PricingConfig:
     storage_classes: dict[str, StorageClassPricing]
     egress: EgressPricing
     requests: RequestPricing
+    provider: str
+    region_name: str
+    pricing_source: str
+    pricing_last_verified: str
 
 
 @dataclass

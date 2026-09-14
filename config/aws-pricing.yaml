@@ -7,7 +7,11 @@
 # pricing_last_verified / source) before using this tool for real budgeting.
 
 aws:
+  provider: AWS
   region: af-south-1
+  region_name: "Africa (Cape Town)"
+  pricing_source: "https://aws.amazon.com/s3/pricing/"
+  pricing_last_verified: "2026-08-31"
 
   exchange_rate:
     usd_zar: 16.05

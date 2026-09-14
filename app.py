@@ -206,10 +206,11 @@ with st.container(border=True, key="section_5"):
 # ---------------------------------------------------------------------------
 with st.container(border=True, key="section_6"):
     theme.section_header(6, "Infrastructure engineering / management")
+    _current_rate = st.session_state.get("hourly_rate_zar", 0)
     theme.callout(
-        "Placeholder rate",
-        "Illustrative planning rate — replace with approved CBIO/UCT loaded technical "
-        "staff rate.",
+        f"Illustrative engineering rate: R{_current_rate:,.0f}/hour",
+        "Planning assumption only — not an approved UCT/CBIO institutional rate. "
+        "Replace with an approved CBIO/UCT loaded technical staff rate.",
     )
     ecol1, ecol2, ecol3, ecol4 = st.columns(4)
     with ecol1:
@@ -433,29 +434,83 @@ with st.expander("Calculation details"):
             st.warning(r.minimum_duration_warning)
 
 # ---------------------------------------------------------------------------
-# 12. Export
+# 12. Pricing & assumptions
 # ---------------------------------------------------------------------------
 with st.container(border=True, key="section_12"):
-    theme.section_header(12, "Export")
+    theme.section_header(12, "Pricing & assumptions")
+    st.markdown(
+        "AWS storage, request, archive retrieval and data-transfer costs are based on "
+        "published AWS pricing for the Africa (Cape Town) region (`af-south-1`). Prices "
+        "are planning estimates and should be verified against current AWS/UCT pricing "
+        "before budgeting or procurement."
+    )
+
+    pcol1, pcol2, pcol3 = st.columns(3)
+    with pcol1:
+        st.markdown(f"**AWS pricing source:**  \n[{pricing.pricing_source}]({pricing.pricing_source})")
+    with pcol2:
+        st.markdown(f"**AWS region:**  \n{pricing.region_name} — `{pricing.region}`")
+    with pcol3:
+        st.markdown(f"**Pricing last verified:**  \n{pricing.pricing_last_verified}")
+
+    st.caption(
+        "Data volumes, workflow data movement, retention periods, exchange rate, VAT and "
+        "engineering effort are configurable planning assumptions. Compute costs are not "
+        "currently included."
+    )
+
+    acol1, acol2 = st.columns(2)
+    with acol1:
+        st.markdown(
+            "**Published AWS pricing**\n"
+            "- S3 Standard storage price\n"
+            "- Glacier storage prices\n"
+            "- Request charges\n"
+            "- Retrieval charges\n"
+            "- Internet data-transfer charges"
+        )
+    with acol2:
+        st.markdown(
+            "**CBIO/project planning assumptions**\n"
+            "- FASTQ / CRAM / gVCF GB per sample\n"
+            "- Active & archive storage duration\n"
+            "- Archive class selection\n"
+            "- Workflow read/pass counts, CRAM retrieval %\n"
+            "- Transfer contingency\n"
+            "- Exchange rate, VAT\n"
+            "- Engineering hours & hourly rate"
+        )
+
+# ---------------------------------------------------------------------------
+# 13. Export
+# ---------------------------------------------------------------------------
+with st.container(border=True, key="section_13"):
+    theme.section_header(13, "Export")
     excol1, excol2, excol3 = st.columns(3)
     with excol1:
         st.download_button(
             "Download CSV",
-            data=cost_export.to_csv(estimate),
+            data=cost_export.to_csv(estimate, pricing),
             file_name=f"{inputs.project_name.replace(' ', '_')}_cost_estimate.csv",
             mime="text/csv",
         )
     with excol2:
         st.download_button(
             "Download JSON",
-            data=cost_export.to_json(estimate),
+            data=cost_export.to_json(estimate, pricing),
             file_name=f"{inputs.project_name.replace(' ', '_')}_cost_estimate.json",
             mime="application/json",
         )
     with excol3:
         st.download_button(
             "Download Markdown summary",
-            data=cost_export.to_markdown(estimate),
+            data=cost_export.to_markdown(estimate, pricing),
             file_name=f"{inputs.project_name.replace(' ', '_')}_cost_estimate.md",
             mime="text/markdown",
         )
+
+theme.disclaimer(
+    "Prototype planning tool — estimates should be validated before budgeting or procurement.",
+    "Actual costs may vary with AWS pricing, exchange rates, data volumes, access "
+    "patterns, network path, retrieval behaviour and institutional agreements.",
+)

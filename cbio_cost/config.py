@@ -112,6 +112,10 @@ def load_pricing(path: str | Path) -> PricingConfig:
         storage_classes=storage_classes,
         egress=egress,
         requests=requests,
+        provider=str(raw["provider"]),
+        region_name=str(raw["region_name"]),
+        pricing_source=str(raw["pricing_source"]),
+        pricing_last_verified=str(raw["pricing_last_verified"]),
     )
 
 

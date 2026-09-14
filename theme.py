@@ -250,6 +250,25 @@ tr.gro-row-emphasis td {{
     margin-bottom: 24px !important;
 }}
 
+/* Final-page disclaimer (see disclaimer() below) — plain text, not a warning box */
+.gro-disclaimer {{
+    border-top: 1px solid {BORDER};
+    margin-top: 2rem;
+    padding-top: 1rem;
+}}
+.gro-disclaimer-headline {{
+    font-family: {FONT_STACK_HEADING};
+    color: {SLATE};
+    font-weight: 600;
+    font-size: 0.95rem;
+}}
+.gro-disclaimer-body {{
+    font-family: {FONT_STACK_BODY};
+    color: {MUTED};
+    font-size: 0.85rem;
+    margin-top: 0.3rem;
+}}
+
 /* Callout component (see callout() below) */
 .gro-callout {{
     background-color: {SOFT_BG};
@@ -443,6 +462,17 @@ def headline(label: str, value: str, sublabel: str) -> None:
         f'<div class="gro-headline-label">{label}</div>'
         f'<div class="gro-headline-value">{value}</div>'
         f'<div class="gro-headline-sublabel">{sublabel}</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def disclaimer(headline_text: str, body: str) -> None:
+    """Render the restrained final-page disclaimer — plain text, no warning box."""
+    st.markdown(
+        f'<div class="gro-disclaimer">'
+        f'<div class="gro-disclaimer-headline">{headline_text}</div>'
+        f'<div class="gro-disclaimer-body">{body}</div>'
         f"</div>",
         unsafe_allow_html=True,
     )

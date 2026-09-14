@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from cbio_cost.config import load_pricing, load_profiles
+from cbio_cost.calculator import build_estimate
+from cbio_cost.config import load_currency_defaults, load_pricing, load_profiles
+from cbio_cost.export import to_csv, to_json, to_markdown
 from cbio_cost.models import (
     EngineeringAssumptions,
     MovementAssumptions,
@@ -195,3 +197,41 @@ def test_cram_retrieval_fraction_out_of_range_raises():
             gvcf_passes=Decimal(2),
             transfer_contingency=Decimal("0.2"),
         )
+
+
+# Pricing provenance metadata (spec 005) ---------------------------------------------------
+
+
+def test_pricing_config_provenance_metadata(pricing):
+    assert pricing.provider == "AWS"
+    assert pricing.region_name
+    assert pricing.pricing_source.startswith("https://")
+    assert pricing.pricing_last_verified
+
+
+@pytest.fixture
+def estimate(profile, pricing):
+    currency = load_currency_defaults(CONFIG_DIR / "aws-pricing.yaml")
+    return build_estimate(
+        profile.project, profile.volumes, profile.storage, profile.movement, profile.engineering, pricing, currency
+    )
+
+
+def test_csv_export_includes_pricing_provenance(estimate, pricing):
+    csv_text = to_csv(estimate, pricing)
+    assert pricing.pricing_source in csv_text
+    assert pricing.pricing_last_verified in csv_text
+
+
+def test_json_export_includes_pricing_provenance(estimate, pricing):
+    json_text = to_json(estimate, pricing)
+    assert '"pricing_source"' in json_text
+    assert pricing.pricing_source in json_text
+    assert pricing.pricing_last_verified in json_text
+
+
+def test_markdown_export_includes_pricing_provenance(estimate, pricing):
+    md_text = to_markdown(estimate, pricing)
+    assert "Pricing & assumptions" in md_text
+    assert pricing.pricing_source in md_text
+    assert pricing.pricing_last_verified in md_text

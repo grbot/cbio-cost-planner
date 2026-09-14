@@ -9,7 +9,7 @@ from dataclasses import asdict
 from decimal import Decimal
 from typing import Any
 
-from cbio_cost.models import CostEstimate
+from cbio_cost.models import CostEstimate, PricingConfig
 from cbio_cost.units import gb_to_tb
 
 
@@ -19,7 +19,20 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Object of type {type(value)} is not JSON serializable")
 
 
-def to_csv(estimate: CostEstimate) -> str:
+def _provenance_rows(estimate: CostEstimate, pricing: PricingConfig) -> list[list[str]]:
+    """Pricing/assumption provenance as label/value pairs, shared by CSV and (in spirit) Markdown."""
+    return [
+        ["AWS region", f"{pricing.region_name} ({pricing.region})"],
+        ["Pricing source", pricing.pricing_source],
+        ["Pricing last verified", pricing.pricing_last_verified],
+        ["USD/ZAR exchange rate", str(estimate.currency.usd_zar)],
+        ["VAT", f"{estimate.currency.vat_fraction * 100}%"],
+        ["Engineering rate", "Illustrative planning assumption, not an approved UCT/CBIO rate"],
+        ["Compute", "Not included"],
+    ]
+
+
+def to_csv(estimate: CostEstimate, pricing: PricingConfig) -> str:
     """Render the cost-component breakdown as CSV text."""
     buffer = io.StringIO()
     writer = csv.writer(buffer)
@@ -32,10 +45,14 @@ def to_csv(estimate: CostEstimate) -> str:
     for item in estimate.line_items:
         writer.writerow([item.label, str(item.amount_zar), item.note])
     writer.writerow(["Compute", "Not included", ""])
+    writer.writerow([])
+    writer.writerow(["Pricing & assumptions", ""])
+    for label, value in _provenance_rows(estimate, pricing):
+        writer.writerow([label, value])
     return buffer.getvalue()
 
 
-def to_json(estimate: CostEstimate) -> str:
+def to_json(estimate: CostEstimate, pricing: PricingConfig) -> str:
     """Render the full estimate (including per-file-type detail) as JSON text."""
     payload = {
         "project": asdict(estimate.inputs),
@@ -62,11 +79,22 @@ def to_json(estimate: CostEstimate) -> str:
         },
         "compute": "Not included",
         "explanation": estimate.explanation,
+        "pricing_provenance": {
+            "provider": pricing.provider,
+            "region_code": pricing.region,
+            "region_name": pricing.region_name,
+            "pricing_source": pricing.pricing_source,
+            "pricing_last_verified": pricing.pricing_last_verified,
+            "usd_zar_exchange_rate": str(estimate.currency.usd_zar),
+            "vat_percent": str(estimate.currency.vat_fraction * 100),
+            "engineering_rate_note": "Illustrative planning assumption, not an approved UCT/CBIO rate",
+            "compute_note": "Not included",
+        },
     }
     return json.dumps(payload, indent=2, default=_json_default)
 
 
-def to_markdown(estimate: CostEstimate) -> str:
+def to_markdown(estimate: CostEstimate, pricing: PricingConfig) -> str:
     """Render a concise Markdown project-cost summary."""
     inputs = estimate.inputs
     raw_tb = gb_to_tb(estimate.volume.raw_total_gb)
@@ -92,4 +120,15 @@ def to_markdown(estimate: CostEstimate) -> str:
     lines.append("")
     if estimate.explanation:
         lines.append(estimate.explanation)
+        lines.append("")
+
+    lines.append("## Pricing & assumptions")
+    lines.append("")
+    lines.append(f"- AWS region: {pricing.region_name} (`{pricing.region}`)")
+    lines.append(f"- Pricing source: {pricing.pricing_source}")
+    lines.append(f"- Pricing last verified: {pricing.pricing_last_verified}")
+    lines.append(f"- USD/ZAR exchange rate: {estimate.currency.usd_zar}")
+    lines.append(f"- VAT: {estimate.currency.vat_fraction * 100}%")
+    lines.append("- Engineering rate is an illustrative planning assumption, not an approved UCT/CBIO rate.")
+    lines.append("- Compute cost is not included.")
     return "\n".join(lines) + "\n"
