@@ -235,3 +235,22 @@ def test_markdown_export_includes_pricing_provenance(estimate, pricing):
     assert "Pricing & assumptions" in md_text
     assert pricing.pricing_source in md_text
     assert pricing.pricing_last_verified in md_text
+
+
+def test_config_loaders_are_not_cache_resource():
+    """Regression guard for the deployed AttributeError on pricing.pricing_source.
+
+    st.cache_resource keys its cache on the wrapper function's own source, not
+    on cbio_cost/config.py or the YAML it reads. That let a lightweight
+    Streamlit Cloud redeploy (code sync + rerun, no full process restart)
+    keep serving a PricingConfig built before pricing_source/region_name/
+    pricing_last_verified existed. app.py's config loaders must stay
+    uncached so every rerun reflects the current config on disk.
+    """
+    app_source = (CONFIG_DIR.parent / "app.py").read_text()
+    for func_name in ("_load_pricing", "_load_profile_and_scenarios"):
+        def_index = app_source.index(f"def {func_name}(")
+        preceding_lines = app_source[:def_index].strip().splitlines()
+        assert "cache_resource" not in preceding_lines[-1], (
+            f"{func_name} must not be decorated with st.cache_resource"
+        )

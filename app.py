@@ -39,13 +39,18 @@ st.set_page_config(page_title="CBIO Infrastructure Cost Planner", layout="wide")
 theme.inject()
 
 
-@st.cache_resource
 def _load_pricing():
+    # Deliberately uncached: parsing this small YAML file is cheap, and
+    # st.cache_resource previously caused a stale PricingConfig (missing the
+    # pricing_source/region_name/pricing_last_verified fields added in
+    # requests/005-pricing-and-disclaimer.md) to survive a lightweight
+    # redeploy, since the cache key is derived from this wrapper's own
+    # source, not from cbio_cost/config.py or the YAML it reads.
     return cost_config.load_pricing(CONFIG_DIR / "aws-pricing.yaml")
 
 
-@st.cache_resource
 def _load_profile_and_scenarios():
+    # See _load_pricing() above — deliberately uncached for the same reason.
     return cost_config.load_profiles(CONFIG_DIR / "project-profiles.yaml")
 
 
