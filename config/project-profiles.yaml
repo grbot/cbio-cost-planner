@@ -1,0 +1,64 @@
+# Built-in example project profile and sensitivity-analysis scenario
+# overlays for the CBIO cost planner (spec §13, §14).
+
+default_profile:
+  project:
+    project_name: "Example WGS Project"
+    project_type: "WGS 30x"
+    num_samples: 500
+    depth_label: "30x"
+    retention_years: 5
+
+  volumes:
+    FASTQ:
+      gb_per_sample: 100
+      archive_class: glacier_flexible
+    CRAM:
+      gb_per_sample: 40
+      archive_class: glacier_flexible
+    gVCF:
+      gb_per_sample: 10
+      archive_class: glacier_flexible
+
+  storage:
+    headroom_percent: 20
+    active_months: 1
+
+  movement:
+    fastq_passes: 1
+    cram_retrieval_percent: 10
+    cram_retrieval_passes: 1
+    gvcf_passes: 2
+    transfer_contingency_percent: 20
+
+  engineering:
+    onboarding_hours: 8
+    operations_hours_per_year: 12
+    closeout_hours: 4
+    hourly_rate_zar: 1000
+
+# Sensitivity-analysis scenarios (spec §13). Each scenario overrides the
+# movement parameters above; storage volumes, archive classes and
+# engineering assumptions are held constant across scenarios so the
+# comparison isolates the effect of data-movement behaviour on total cost.
+scenarios:
+  Low movement:
+    fastq_passes: 1
+    cram_retrieval_percent: 5
+    cram_retrieval_passes: 1
+    gvcf_passes: 1
+    transfer_contingency_percent: 10
+
+  Expected:
+    fastq_passes: 1
+    cram_retrieval_percent: 10
+    cram_retrieval_passes: 1
+    gvcf_passes: 2
+    transfer_contingency_percent: 20
+
+  High movement:
+    fastq_passes: 2
+    cram_retrieval_percent: 25
+    cram_retrieval_passes: 1
+    gvcf_passes: 3
+    transfer_contingency_percent: 40

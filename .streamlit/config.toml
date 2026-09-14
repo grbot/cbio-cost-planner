@@ -1,0 +1,14 @@
+# GRO visual style (requests/002-styling.md) applied to Streamlit's native
+# theme. base="light" pins the app to a light theme regardless of the
+# viewer's OS/browser dark-mode preference — required for the GRO look,
+# which is explicitly white-background and restrained.
+[theme]
+base = "light"
+primaryColor = "#0B8BA5"
+backgroundColor = "#FAFBFC"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#111111"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
