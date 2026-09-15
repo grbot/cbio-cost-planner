@@ -20,6 +20,7 @@ import pandas as pd
 import streamlit as st
 
 import theme
+from data_volume_guide import DATA_VOLUME_GUIDE
 from cbio_cost import config as cost_config
 from cbio_cost import export as cost_export
 from cbio_cost.calculator import build_estimate, build_scenarios, explain_result
@@ -169,6 +170,23 @@ st.radio(
 is_wgs_mode = st.session_state["project_mode"] == WGS_MODE
 
 # ---------------------------------------------------------------------------
+# Data volume reference guide (spec 007) — documentation only, collapsed by
+# default, visible from both modes; never feeds calculations.
+# ---------------------------------------------------------------------------
+with st.expander("Data volume reference guide"):
+    st.caption("Rough file-size estimates for common bioinformatics data types. Use measured project volumes where available.")
+    theme.table(
+        columns=["Data / format", "Rough planning size", "Notes"],
+        rows=[[row["format"], row["size"], row["notes"]] for row in DATA_VOLUME_GUIDE],
+        align=["left", "right", "left"],
+    )
+    st.caption(
+        "**Planning estimates only.** Actual file sizes vary with sequencing platform, coverage, "
+        "read length, compression, assay design, variant caller and processing pipeline. Where "
+        "measured project volumes are available, use those instead."
+    )
+
+# ---------------------------------------------------------------------------
 # 1. Project
 # ---------------------------------------------------------------------------
 with st.container(border=True, key="section_1"):
@@ -197,6 +215,10 @@ with st.container(border=True, key="section_2"):
         st.caption(
             "The WGS 30x profile already assumes 30x sequencing depth — per-sample volumes "
             "below already reflect that and are not scaled again."
+        )
+        st.caption(
+            "The WGS 30x profile uses **100 GB FASTQ, 40 GB CRAM and 10 GB gVCF/QC per sample** "
+            "as planning defaults. See the Data volume reference guide above for typical ranges."
         )
         with st.expander("Advanced WGS assumptions"):
             st.caption("Editable planning defaults, not measured data.")
@@ -265,7 +287,17 @@ with st.container(border=True, key="section_2"):
 
                 col3, col4 = st.columns(2)
                 with col3:
-                    st.number_input("Size", min_value=0.0, step=1.0, key=f"custom_size_{dataset_id}")
+                    st.number_input(
+                        "Size",
+                        min_value=0.0,
+                        step=1.0,
+                        key=f"custom_size_{dataset_id}",
+                        help=(
+                            "Enter the total size of this dataset, not the size per sample. If "
+                            "the actual volume is not known, use the Data volume reference guide "
+                            "above as a rough planning estimate."
+                        ),
+                    )
                 with col4:
                     unit = st.session_state[f"custom_unit_{dataset_id}"]
                     size = _dec(st.session_state[f"custom_size_{dataset_id}"])
