@@ -20,6 +20,7 @@ import pytest
 from cbio_cost.calculator import build_estimate, build_scenarios
 from cbio_cost.config import build_wgs_datasets, load_currency_defaults, load_pricing, load_profiles
 from cbio_cost.export import to_csv, to_json, to_markdown
+from data_volume_guide import DATA_VOLUME_GUIDE
 from cbio_cost.models import (
     Dataset,
     EngineeringAssumptions,
@@ -341,6 +342,13 @@ def test_markdown_export_includes_pricing_provenance(estimate, pricing):
     assert "Project mode: WGS 30x" in md_text
 
 
+def test_markdown_export_includes_governance_statement(estimate, pricing):
+    """Spec 008 §15: the Markdown export's notes section states that a cost
+    estimate does not constitute approval to store sensitive data in AWS."""
+    md_text = to_markdown(estimate, pricing)
+    assert "do not constitute approval to store" in md_text
+
+
 def test_config_loaders_are_not_cache_resource():
     """Regression guard for the deployed AttributeError on pricing.pricing_source.
 
@@ -395,3 +403,28 @@ def test_build_scenarios_generic_over_arbitrary_datasets(pricing):
         < estimates["Expected"].transfer.planned_egress_gb
         < estimates["High movement"].transfer.planned_egress_gb
     )
+
+
+# 12. Data volume reference guide (spec 008 §6) --------------------------------------------
+
+
+def test_data_volume_guide_includes_low_pass_and_existing_entries():
+    formats = [row["format"] for row in DATA_VOLUME_GUIDE]
+    for expected in (
+        "4× WGS FASTQ",
+        "4× WGS CRAM",
+        "12× WGS FASTQ",
+        "12× WGS CRAM",
+        "30× WGS FASTQ",
+        "30× WGS BAM",
+        "30× WGS CRAM",
+        "30× WGS gVCF",
+        "30× WGS QC + indexes",
+        "WES FASTQ",
+        "WES BAM/CRAM",
+        "RNA-seq FASTQ",
+        "RNA-seq BAM",
+        "Genotyping array",
+        "Joint VCF/BCF",
+    ):
+        assert expected in formats

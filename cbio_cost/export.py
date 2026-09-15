@@ -181,4 +181,9 @@ def to_markdown(estimate: CostEstimate, pricing: PricingConfig) -> str:
     lines.append(f"- VAT: {estimate.currency.vat_fraction * 100}%")
     lines.append("- Engineering rate is an illustrative planning assumption, not an approved UCT/CBIO rate.")
     lines.append("- Compute cost is not included.")
+    lines.append(
+        "- Infrastructure cost estimates do not constitute approval to store sensitive research "
+        "data in AWS or other cloud/object storage. Project-specific consent, ethics, data-access "
+        "and institutional requirements must be reviewed separately."
+    )
     return "\n".join(lines) + "\n"

@@ -170,6 +170,21 @@ st.radio(
 is_wgs_mode = st.session_state["project_mode"] == WGS_MODE
 
 # ---------------------------------------------------------------------------
+# Sensitive data and governance notice (spec 008) — informational only,
+# visible without opening an expander, in both modes; not a calculated value.
+# ---------------------------------------------------------------------------
+theme.callout(
+    "Sensitive data and governance",
+    "This calculator estimates infrastructure costs only. Genomic, phenotype and other "
+    "sensitive research data should only be stored in cloud/object storage where this is "
+    "permitted by the project's consent, ethics approvals, data-access agreements and "
+    "applicable institutional policies. Storage location, access controls, encryption, audit "
+    "logging, retention and data-transfer requirements should be reviewed before deployment. "
+    "<strong>A cost estimate does not constitute approval to store project data in AWS.</strong>",
+)
+st.caption("Do not enter participant-level or other sensitive research data into this planning tool.")
+
+# ---------------------------------------------------------------------------
 # Data volume reference guide (spec 007) — documentation only, collapsed by
 # default, visible from both modes; never feeds calculations.
 # ---------------------------------------------------------------------------
