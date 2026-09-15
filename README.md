@@ -55,6 +55,12 @@ cbio-cost-planner/
 └── docs/assumptions.md        # Assumptions, simplifications, pricing-verification checklist
 ```
 
+## Design documentation
+
+See [`docs/design-and-assumptions.md`](docs/design-and-assumptions.md) for
+architecture decisions, planning assumptions, benchmark provenance and
+open research questions.
+
 ## Scope
 
 Implemented in this first version: data volume/envelope modelling, the
