@@ -2,6 +2,11 @@
 
 This is the only module the Streamlit UI should call into for calculations
 (spec §2, §19: no calculation logic duplicated between UI and backend).
+
+Both WGS 30x and Custom Project reduce to the same inputs before reaching
+this module: a ``list[Dataset]`` plus project-level retention/contingency/
+headroom (spec 006 §3). Nothing here is aware of file types, samples, or
+sequencing depth.
 """
 
 from __future__ import annotations
@@ -13,12 +18,11 @@ from cbio_cost.models import (
     CostEstimate,
     CostLineItem,
     CurrencyAssumptions,
+    Dataset,
     EngineeringAssumptions,
-    FileTypeVolumeAssumption,
-    MovementAssumptions,
     PricingConfig,
     ProjectInputs,
-    StorageAssumptions,
+    ScenarioAssumptions,
 )
 from cbio_cost.operations import build_operations_cost_result
 from cbio_cost.storage import build_storage_cost_result, calculate_data_volume
@@ -32,24 +36,23 @@ def _usd_to_zar_inc_vat(amount_usd: Decimal, currency: CurrencyAssumptions) -> D
 
 def build_estimate(
     inputs: ProjectInputs,
-    volumes: dict[str, FileTypeVolumeAssumption],
-    storage: StorageAssumptions,
-    movement: MovementAssumptions,
+    datasets: list[Dataset],
     engineering: EngineeringAssumptions,
     pricing: PricingConfig,
     currency: CurrencyAssumptions,
 ) -> CostEstimate:
-    """Compute a complete cost estimate for one set of inputs/assumptions."""
-    volume = calculate_data_volume(inputs, volumes, storage)
-    transfer = build_transfer_result(volume.per_file_type_gb, movement, pricing)
+    """Compute a complete cost estimate for one set of datasets/assumptions."""
+    if not datasets:
+        raise ValueError("A project must contain at least one dataset")
+
+    volume = calculate_data_volume(datasets, inputs.headroom_fraction)
+    transfer = build_transfer_result(datasets, inputs.transfer_contingency, pricing)
     storage_cost = build_storage_cost_result(
-        inputs,
-        volumes,
-        volume.per_file_type_gb,
+        datasets,
         volume.raw_total_gb,
-        volume.envelope_gb,
         transfer.planned_egress_gb,
-        storage,
+        inputs.headroom_fraction,
+        inputs.retention_years,
         pricing,
     )
     operations_cost = build_operations_cost_result(inputs, engineering)
@@ -98,6 +101,7 @@ def build_estimate(
 
     return CostEstimate(
         inputs=inputs,
+        datasets=datasets,
         volume=volume,
         transfer=transfer,
         storage=storage_cost,
@@ -114,18 +118,30 @@ def build_estimate(
 
 def build_scenarios(
     inputs: ProjectInputs,
-    volumes: dict[str, FileTypeVolumeAssumption],
-    storage: StorageAssumptions,
     engineering: EngineeringAssumptions,
     pricing: PricingConfig,
     currency: CurrencyAssumptions,
-    scenario_movements: dict[str, MovementAssumptions],
+    scenarios: dict[str, ScenarioAssumptions],
 ) -> dict[str, CostEstimate]:
-    """Build one :class:`CostEstimate` per named scenario (spec §13)."""
-    return {
-        name: build_estimate(inputs, volumes, storage, movement, engineering, pricing, currency)
-        for name, movement in scenario_movements.items()
-    }
+    """Build one :class:`CostEstimate` per named scenario (spec §13; spec 006 §19).
+
+    Each scenario supplies its own dataset list (different retrieval
+    fraction/read passes) and transfer contingency; storage/archive/
+    engineering assumptions come from ``inputs``/``engineering`` and are held
+    constant so the comparison isolates data-movement behaviour.
+    """
+    estimates: dict[str, CostEstimate] = {}
+    for name, scenario in scenarios.items():
+        scenario_inputs = ProjectInputs(
+            project_name=inputs.project_name,
+            project_type=inputs.project_type,
+            retention_years=inputs.retention_years,
+            transfer_contingency=scenario.transfer_contingency,
+            headroom_fraction=inputs.headroom_fraction,
+            num_samples=inputs.num_samples,
+        )
+        estimates[name] = build_estimate(scenario_inputs, scenario.datasets, engineering, pricing, currency)
+    return estimates
 
 
 def explain_result(estimate: CostEstimate) -> str:
@@ -138,14 +154,20 @@ def explain_result(estimate: CostEstimate) -> str:
     envelope_tb = gb_to_tb(estimate.volume.envelope_gb)
     egress_tb = gb_to_tb(estimate.transfer.planned_egress_gb)
     rounded_envelope_tb = Decimal(math.ceil(envelope_tb / 10) * 10)
+    num_datasets = len(estimate.datasets)
+
+    if inputs.num_samples is not None:
+        subject = f"This {inputs.num_samples}-sample {inputs.project_type} project"
+    else:
+        dataset_word = "dataset" if num_datasets == 1 else "datasets"
+        subject = f"This {inputs.project_type} project ({num_datasets} {dataset_word})"
 
     return (
-        f"This {inputs.num_samples}-sample {inputs.project_type} project is estimated to "
-        f"generate approximately {raw_tb:.1f} TB of durable genomic data. With operational "
-        f"headroom, a {envelope_tb:.1f} TB storage envelope is appropriate, which may be "
-        f"rounded operationally to a {rounded_envelope_tb:.0f} TB project allocation. The "
-        f"expected AWS-to-Ilifu data movement is approximately {egress_tb:.1f} TB under the "
-        "selected workflow assumptions. Because AWS internet egress is charged while ingress "
-        "is generally free, transfer behaviour is an important component of the total project "
-        "cost."
+        f"{subject} is estimated to generate approximately {raw_tb:.1f} TB of durable "
+        f"project data. With operational headroom, a {envelope_tb:.1f} TB storage envelope "
+        f"is appropriate, which may be rounded operationally to a {rounded_envelope_tb:.0f} TB "
+        f"project allocation. The expected AWS-to-Ilifu data movement is approximately "
+        f"{egress_tb:.1f} TB under the selected workflow assumptions. Because AWS internet "
+        "egress is charged while ingress is generally free, transfer behaviour is an "
+        "important component of the total project cost."
     )

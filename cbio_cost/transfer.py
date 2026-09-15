@@ -1,26 +1,22 @@
-"""Data movement (egress) volume and AWS transfer cost calculations (spec §5, §6)."""
+"""Data movement (egress) volume and AWS transfer cost calculations (spec §5, §6;
+spec 006 §6-§8: egress is computed per dataset from its own retrieval
+fraction and read-pass count, then summed and contingency-adjusted at the
+project level)."""
 
 from __future__ import annotations
 
 from decimal import Decimal
 
-from cbio_cost.models import MovementAssumptions, PricingConfig, TraceLine, TransferResult
+from cbio_cost.models import Dataset, DatasetEgressDetail, PricingConfig, TraceLine, TransferResult
 from cbio_cost.storage import tiered_cost
 
 
-def fastq_egress(fastq_volume_gb: Decimal, fastq_passes: Decimal) -> Decimal:
-    """AWS S3 -> Ilifu egress for FASTQ primary processing."""
-    return fastq_volume_gb * fastq_passes
+def dataset_base_egress_gb(dataset: Dataset) -> Decimal:
+    """AWS S3 -> Ilifu base workflow egress for one dataset (spec 006 §8).
 
-
-def cram_egress(cram_volume_gb: Decimal, retrieval_fraction: Decimal, retrieval_passes: Decimal) -> Decimal:
-    """AWS S3 -> Ilifu egress for the subset of CRAMs that are retrieved."""
-    return cram_volume_gb * retrieval_fraction * retrieval_passes
-
-
-def gvcf_egress(gvcf_volume_gb: Decimal, passes: Decimal) -> Decimal:
-    """AWS S3 -> Ilifu egress for gVCF joint-calling retrieval passes."""
-    return gvcf_volume_gb * passes
+    base workflow egress = dataset size x retrieval fraction x read passes
+    """
+    return dataset.size_gb * dataset.retrieval_fraction * dataset.read_passes
 
 
 def apply_contingency(base_egress_gb: Decimal, contingency_fraction: Decimal) -> Decimal:
@@ -43,62 +39,56 @@ def tiered_egress_cost(quantity_gb: Decimal, pricing: PricingConfig) -> Decimal:
 
 
 def build_transfer_result(
-    per_file_type_gb: dict[str, Decimal],
-    movement: MovementAssumptions,
+    datasets: list[Dataset],
+    transfer_contingency: Decimal,
     pricing: PricingConfig,
 ) -> TransferResult:
-    """Assemble the full data-movement/egress result (spec §5, §6)."""
-    fastq_gb = per_file_type_gb.get("FASTQ", Decimal(0))
-    cram_gb = per_file_type_gb.get("CRAM", Decimal(0))
-    gvcf_gb = per_file_type_gb.get("gVCF", Decimal(0))
+    """Assemble the full data-movement/egress result (spec §5, §6; spec 006 §8)."""
+    details: list[DatasetEgressDetail] = []
+    trace: list[TraceLine] = []
+    for dataset in datasets:
+        egress_gb = dataset_base_egress_gb(dataset)
+        details.append(DatasetEgressDetail(name=dataset.name, base_egress_gb=egress_gb))
+        trace.append(
+            TraceLine(
+                label=f"{dataset.name} base workflow egress",
+                detail=(
+                    f"{dataset.size_gb} GB x {dataset.retrieval_fraction * 100}% retrieval x "
+                    f"{dataset.read_passes} pass(es) = {egress_gb} GB"
+                ),
+            )
+        )
 
-    fastq_e = fastq_egress(fastq_gb, movement.fastq_passes)
-    cram_e = cram_egress(cram_gb, movement.cram_retrieval_fraction, movement.cram_retrieval_passes)
-    gvcf_e = gvcf_egress(gvcf_gb, movement.gvcf_passes)
-
-    per_file_type_egress_gb = {"FASTQ": fastq_e, "CRAM": cram_e, "gVCF": gvcf_e}
-    base_egress_gb = fastq_e + cram_e + gvcf_e
-    planned_egress_gb = apply_contingency(base_egress_gb, movement.transfer_contingency)
+    base_egress_gb = sum((d.base_egress_gb for d in details), Decimal(0))
+    planned_egress_gb = apply_contingency(base_egress_gb, transfer_contingency)
     egress_cost_usd = tiered_egress_cost(planned_egress_gb, pricing)
 
-    trace = [
+    trace.append(
         TraceLine(
-            label="FASTQ egress",
-            detail=f"{fastq_gb} GB x {movement.fastq_passes} pass(es) = {fastq_e} GB",
-        ),
-        TraceLine(
-            label="CRAM egress",
-            detail=(
-                f"{cram_gb} GB x {movement.cram_retrieval_fraction * 100}% retrieval x "
-                f"{movement.cram_retrieval_passes} pass(es) = {cram_e} GB"
-            ),
-        ),
-        TraceLine(
-            label="gVCF egress",
-            detail=f"{gvcf_gb} GB x {movement.gvcf_passes} pass(es) = {gvcf_e} GB",
-        ),
-        TraceLine(
-            label="Base egress",
-            detail=f"{fastq_e} + {cram_e} + {gvcf_e} GB = {base_egress_gb} GB",
-        ),
+            label="Total base workflow egress",
+            detail=" + ".join(f"{d.base_egress_gb} GB" for d in details) + f" = {base_egress_gb} GB",
+        )
+    )
+    trace.append(
         TraceLine(
             label="Planned egress (with contingency)",
             detail=(
-                f"{base_egress_gb} GB x (1 + {movement.transfer_contingency * 100}%) = "
-                f"{planned_egress_gb} GB"
+                f"{base_egress_gb} GB x (1 + {transfer_contingency * 100}%) = {planned_egress_gb} GB"
             ),
-        ),
+        )
+    )
+    trace.append(
         TraceLine(
             label="AWS egress cost",
             detail=(
                 f"{planned_egress_gb} GB, less {pricing.egress.free_allowance_gb_per_month} GB "
                 f"free allowance, tiered @ af-south-1 egress rates = ${egress_cost_usd}"
             ),
-        ),
-    ]
+        )
+    )
 
     return TransferResult(
-        per_file_type_egress_gb=per_file_type_egress_gb,
+        datasets=details,
         base_egress_gb=base_egress_gb,
         planned_egress_gb=planned_egress_gb,
         egress_cost_usd=egress_cost_usd,

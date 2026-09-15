@@ -6,7 +6,6 @@ default_profile:
     project_name: "Example WGS Project"
     project_type: "WGS 30x"
     num_samples: 500
-    depth_label: "30x"
     retention_years: 5
 
   volumes:
@@ -24,12 +23,14 @@ default_profile:
     headroom_percent: 20
     active_months: 1
 
+  transfer:
+    contingency_percent: 20
+
   movement:
     fastq_passes: 1
     cram_retrieval_percent: 10
     cram_retrieval_passes: 1
     gvcf_passes: 2
-    transfer_contingency_percent: 20
 
   engineering:
     onboarding_hours: 8

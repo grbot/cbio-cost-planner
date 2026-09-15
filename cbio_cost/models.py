@@ -4,6 +4,13 @@ Convention: every percentage/fraction field (headroom, contingency, VAT,
 retrieval fraction, ...) is stored as a ``Decimal`` fraction in the range
 ``[0, 1]`` (e.g. 20% is ``Decimal("0.20")``), not as 0-100. UI code is
 responsible for converting user-facing percent inputs into this form.
+
+Architecture (spec 006 §3): both the WGS 30x template and Custom Project
+mode ultimately build a plain ``list[Dataset]`` plus a project-level
+``transfer_contingency``/``headroom_fraction``/``retention_years``. Every
+downstream calculation (storage.py, transfer.py, calculator.py) operates
+only on that generic representation, never on file-type-specific fields, so
+there is exactly one calculation engine for both modes.
 """
 
 from __future__ import annotations
@@ -11,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-FILE_TYPES: tuple[str, ...] = ("FASTQ", "CRAM", "gVCF")
+WGS_FILE_TYPES: tuple[str, ...] = ("FASTQ", "CRAM", "gVCF")
 
 STORAGE_CLASS_KEYS: tuple[str, ...] = (
     "s3_standard",
@@ -22,25 +29,60 @@ STORAGE_CLASS_KEYS: tuple[str, ...] = (
 
 
 @dataclass
+class Dataset:
+    """One arbitrary, independently-costed data collection (spec 006 §3-§8, §13).
+
+    Both WGS 30x (generated from the per-sample-volume template) and Custom
+    Project (entered directly by the user) produce a list of these.
+    """
+
+    name: str
+    size_gb: Decimal
+    retrieval_fraction: Decimal
+    read_passes: Decimal
+    active_months: Decimal
+    archive_class: str
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.name.strip():
+            raise ValueError("Dataset name cannot be blank")
+        if self.size_gb <= 0:
+            raise ValueError(f"{self.name}: dataset size must be greater than zero")
+        if not (Decimal(0) <= self.retrieval_fraction <= Decimal(1)):
+            raise ValueError(f"{self.name}: retrieval percentage must be between 0 and 100")
+        if self.read_passes < 0:
+            raise ValueError(f"{self.name}: number of read passes cannot be negative")
+        if self.active_months < 0:
+            raise ValueError(f"{self.name}: active storage duration cannot be negative")
+        if self.archive_class not in STORAGE_CLASS_KEYS:
+            raise ValueError(f"{self.name}: unknown archive_class '{self.archive_class}'")
+
+
+@dataclass
 class ProjectInputs:
-    """Top-level project description (spec §3)."""
+    """Top-level project description (spec §3; spec 006 §1-§2)."""
 
     project_name: str
     project_type: str
-    num_samples: int
-    depth_label: str
     retention_years: Decimal
+    transfer_contingency: Decimal
+    headroom_fraction: Decimal = Decimal("0")
+    num_samples: int | None = None
 
     def __post_init__(self) -> None:
-        if self.num_samples <= 0:
-            raise ValueError("num_samples must be a positive integer")
         if self.retention_years <= 0:
             raise ValueError("retention_years must be positive")
+        if self.transfer_contingency < 0:
+            raise ValueError("transfer_contingency cannot be negative")
+        if self.headroom_fraction < 0:
+            raise ValueError("headroom_fraction cannot be negative")
+        if self.num_samples is not None and self.num_samples <= 0:
+            raise ValueError("num_samples must be a positive integer")
 
 
 @dataclass
 class FileTypeVolumeAssumption:
-    """Per-file-type data volume and archive destination (spec §4, §8)."""
+    """Per-sample data volume and archive destination for the WGS 30x template (spec §4, §8)."""
 
     name: str
     gb_per_sample: Decimal
@@ -54,28 +96,15 @@ class FileTypeVolumeAssumption:
 
 
 @dataclass
-class StorageAssumptions:
-    """Storage envelope and active-period assumptions (spec §4, §7)."""
-
-    headroom_fraction: Decimal
-    active_months: Decimal
-
-    def __post_init__(self) -> None:
-        if not (Decimal(0) <= self.headroom_fraction):
-            raise ValueError("headroom_fraction cannot be negative")
-        if self.active_months < 0:
-            raise ValueError("active_months cannot be negative")
-
-
-@dataclass
-class MovementAssumptions:
-    """Data-movement (egress-driving) assumptions (spec §5)."""
+class WgsMovementAssumptions:
+    """WGS 30x per-file-type data-movement assumptions (spec §5), used only to
+    generate the WGS template's ``Dataset`` objects. Project-wide transfer
+    contingency lives on :class:`ProjectInputs` instead (spec 006 §3)."""
 
     fastq_passes: Decimal
     cram_retrieval_fraction: Decimal
     cram_retrieval_passes: Decimal
     gvcf_passes: Decimal
-    transfer_contingency: Decimal
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -87,8 +116,18 @@ class MovementAssumptions:
                 raise ValueError(f"{label} cannot be negative")
         if not (Decimal(0) <= self.cram_retrieval_fraction <= Decimal(1)):
             raise ValueError("cram_retrieval_fraction must be between 0 and 1")
-        if self.transfer_contingency < 0:
-            raise ValueError("transfer_contingency cannot be negative")
+
+
+@dataclass
+class ScenarioAssumptions:
+    """One named sensitivity-analysis scenario: an alternate dataset list
+    (different retrieval/passes) plus its own transfer contingency (spec §13;
+    spec 006 §19). Storage volumes, archive classes and engineering
+    assumptions are held constant across scenarios so the comparison
+    isolates the effect of data-movement behaviour on total cost."""
+
+    datasets: list[Dataset]
+    transfer_contingency: Decimal
 
 
 @dataclass
@@ -188,16 +227,29 @@ class TraceLine:
 
 
 @dataclass
+class DatasetVolumeDetail:
+    name: str
+    size_gb: Decimal
+    envelope_gb: Decimal
+
+
+@dataclass
 class VolumeResult:
-    per_file_type_gb: dict[str, Decimal]
+    datasets: list[DatasetVolumeDetail]
     raw_total_gb: Decimal
     envelope_gb: Decimal
     trace: list[TraceLine] = field(default_factory=list)
 
 
 @dataclass
+class DatasetEgressDetail:
+    name: str
+    base_egress_gb: Decimal
+
+
+@dataclass
 class TransferResult:
-    per_file_type_egress_gb: dict[str, Decimal]
+    datasets: list[DatasetEgressDetail]
     base_egress_gb: Decimal
     planned_egress_gb: Decimal
     egress_cost_usd: Decimal
@@ -205,12 +257,15 @@ class TransferResult:
 
 
 @dataclass
-class ArchiveClassResult:
-    file_type: str
-    storage_class: str
-    monthly_cost_usd: Decimal
+class DatasetStorageResult:
+    """Independent active + archive storage cost for one dataset (spec 006 §13-§14, §17)."""
+
+    name: str
+    archive_class: str
+    active_storage_cost_usd: Decimal
     months_in_archive: Decimal
-    total_cost_usd: Decimal
+    archive_monthly_cost_usd: Decimal
+    archive_total_cost_usd: Decimal
     minimum_duration_warning: str | None
     retrieval_characteristics: str
     requires_restore: bool
@@ -218,9 +273,9 @@ class ArchiveClassResult:
 
 @dataclass
 class StorageCostResult:
+    datasets: list[DatasetStorageResult]
     active_storage_cost_usd: Decimal
     request_cost_usd: Decimal
-    archive_results: list[ArchiveClassResult]
     archive_monthly_cost_usd: Decimal
     archive_annual_cost_usd: Decimal
     archive_total_cost_usd: Decimal
@@ -246,6 +301,7 @@ class CostLineItem:
 @dataclass
 class CostEstimate:
     inputs: ProjectInputs
+    datasets: list[Dataset]
     volume: VolumeResult
     transfer: TransferResult
     storage: StorageCostResult

@@ -1,16 +1,18 @@
-"""Data volume and S3/Glacier storage cost calculations (spec §4, §7, §8, §9)."""
+"""Data volume and S3/Glacier storage cost calculations (spec §4, §7, §8, §9;
+spec 006 §13-§17: every calculation runs per-dataset off the generic
+``Dataset`` model, then sums across datasets — the same code path for WGS
+30x and Custom Project)."""
 
 from __future__ import annotations
 
 from decimal import Decimal
 
 from cbio_cost.models import (
-    ArchiveClassResult,
-    FileTypeVolumeAssumption,
+    Dataset,
+    DatasetStorageResult,
+    DatasetVolumeDetail,
     PriceTier,
     PricingConfig,
-    ProjectInputs,
-    StorageAssumptions,
     StorageCostResult,
     TraceLine,
     VolumeResult,
@@ -44,64 +46,54 @@ def tiered_cost(quantity_gb: Decimal, tiers: list[PriceTier]) -> Decimal:
     return cost
 
 
-def calculate_data_volume(
-    inputs: ProjectInputs,
-    volumes: dict[str, FileTypeVolumeAssumption],
-    storage: StorageAssumptions,
-) -> VolumeResult:
-    """Compute per-file-type and total durable data volume, plus the
-    provisioned planning envelope after headroom (spec §4). Never rounds."""
-    per_file_type_gb: dict[str, Decimal] = {}
+def calculate_data_volume(datasets: list[Dataset], headroom_fraction: Decimal) -> VolumeResult:
+    """Compute per-dataset and total durable data volume, plus the
+    provisioned planning envelope after headroom (spec §4; spec 006 §5, §15).
+    Never rounds."""
+    details: list[DatasetVolumeDetail] = []
     trace: list[TraceLine] = []
-    for name, assumption in volumes.items():
-        volume_gb = Decimal(inputs.num_samples) * assumption.gb_per_sample
-        per_file_type_gb[name] = volume_gb
+    for dataset in datasets:
+        envelope_gb = dataset.size_gb * (Decimal(1) + headroom_fraction)
+        details.append(DatasetVolumeDetail(name=dataset.name, size_gb=dataset.size_gb, envelope_gb=envelope_gb))
         trace.append(
             TraceLine(
-                label=f"{name} volume",
-                detail=f"{inputs.num_samples} x {assumption.gb_per_sample} GB = {volume_gb} GB",
+                label=f"{dataset.name} size",
+                detail=f"{dataset.size_gb} GB",
             )
         )
 
-    raw_total_gb = sum(per_file_type_gb.values(), Decimal(0))
+    raw_total_gb = sum((d.size_gb for d in details), Decimal(0))
     trace.append(
         TraceLine(
-            label="Raw durable volume",
-            detail=" + ".join(f"{v} GB" for v in per_file_type_gb.values()) + f" = {raw_total_gb} GB",
+            label="Total durable project volume",
+            detail=" + ".join(f"{d.size_gb} GB" for d in details) + f" = {raw_total_gb} GB",
         )
     )
 
-    envelope_gb = raw_total_gb * (Decimal(1) + storage.headroom_fraction)
+    envelope_gb = raw_total_gb * (Decimal(1) + headroom_fraction)
     trace.append(
         TraceLine(
             label="Provisioned envelope",
-            detail=(
-                f"{raw_total_gb} GB x (1 + {storage.headroom_fraction * 100}%) = {envelope_gb} GB"
-            ),
+            detail=f"{raw_total_gb} GB x (1 + {headroom_fraction * 100}%) = {envelope_gb} GB",
         )
     )
 
     return VolumeResult(
-        per_file_type_gb=per_file_type_gb,
+        datasets=details,
         raw_total_gb=raw_total_gb,
         envelope_gb=envelope_gb,
         trace=trace,
     )
 
 
-def active_storage_cost(envelope_gb: Decimal, active_months: Decimal, pricing: PricingConfig) -> Decimal:
-    """Tiered S3 Standard cost for the active-processing period (spec §7)."""
-    s3_standard = pricing.storage_classes["s3_standard"]
-    monthly_cost = tiered_cost(envelope_gb, s3_standard.tiers)
-    return monthly_cost * active_months
-
-
 def request_cost(raw_total_gb: Decimal, planned_egress_gb: Decimal, pricing: PricingConfig) -> Decimal:
     """Estimate S3 PUT/GET/lifecycle-transition request costs (spec §1, §6).
 
     Individual object counts aren't tracked by this planning tool, so request
-    counts are estimated from volume using an assumed average object size.
-    This is a coarse planning approximation, not a billing-accurate count.
+    counts are estimated from total project volume using an assumed average
+    object size. This is a coarse planning approximation, not a
+    billing-accurate count, and is modelled once across the whole project
+    rather than per dataset.
     """
     put_requests = raw_total_gb / AVG_OBJECT_SIZE_GB
     get_requests = planned_egress_gb / AVG_OBJECT_SIZE_GB
@@ -115,110 +107,124 @@ def request_cost(raw_total_gb: Decimal, planned_egress_gb: Decimal, pricing: Pri
     )
 
 
-def archive_storage_cost(
-    inputs: ProjectInputs,
-    volumes: dict[str, FileTypeVolumeAssumption],
-    per_file_type_gb: dict[str, Decimal],
-    storage: StorageAssumptions,
+def _dataset_storage_result(
+    dataset: Dataset,
+    headroom_fraction: Decimal,
+    retention_months: Decimal,
     pricing: PricingConfig,
-) -> tuple[list[ArchiveClassResult], Decimal, Decimal, Decimal]:
-    """Per-file-type archive storage cost over the retention period (spec §8, §9).
+) -> tuple[DatasetStorageResult, TraceLine]:
+    envelope_gb = dataset.size_gb * (Decimal(1) + headroom_fraction)
+    s3_standard = pricing.storage_classes["s3_standard"]
+    s3_monthly_cost = tiered_cost(envelope_gb, s3_standard.tiers)
 
-    Returns (per-file-type results, aggregate monthly cost, aggregate annual
-    cost, aggregate total cost over the archived portion of the retention
-    period).
-    """
-    retention_months = inputs.retention_years * MONTHS_PER_YEAR
-    months_in_archive = retention_months - storage.active_months
+    if dataset.archive_class == "s3_standard":
+        # S3-Standard-only dataset: no lifecycle transition, so it simply
+        # stays in S3 Standard for the whole retention period (spec 006 §14).
+        active_cost = s3_monthly_cost * retention_months
+        result = DatasetStorageResult(
+            name=dataset.name,
+            archive_class=dataset.archive_class,
+            active_storage_cost_usd=active_cost,
+            months_in_archive=Decimal(0),
+            archive_monthly_cost_usd=Decimal(0),
+            archive_total_cost_usd=Decimal(0),
+            minimum_duration_warning=None,
+            retrieval_characteristics=s3_standard.retrieval_characteristics,
+            requires_restore=False,
+        )
+        trace = TraceLine(
+            label=f"{dataset.name} storage (S3 Standard, full retention)",
+            detail=(
+                f"{envelope_gb} GB tiered @ S3 Standard rates x {retention_months} month(s) "
+                f"= ${active_cost}"
+            ),
+        )
+        return result, trace
+
+    active_months = min(dataset.active_months, retention_months)
+    active_cost = s3_monthly_cost * active_months
+    months_in_archive = retention_months - active_months
     if months_in_archive < 0:
         months_in_archive = Decimal(0)
 
-    results: list[ArchiveClassResult] = []
-    for name, assumption in volumes.items():
-        storage_class = pricing.storage_classes[assumption.archive_class]
-        volume_gb = per_file_type_gb[name]
-        monthly_cost = tiered_cost(volume_gb, storage_class.tiers)
-        total_cost = monthly_cost * months_in_archive
+    storage_class = pricing.storage_classes[dataset.archive_class]
+    archive_monthly_cost = tiered_cost(envelope_gb, storage_class.tiers)
+    archive_total_cost = archive_monthly_cost * months_in_archive
 
-        warning: str | None = None
-        archived_days = months_in_archive * APPROX_DAYS_PER_MONTH
-        if 0 < archived_days < storage_class.minimum_storage_duration_days:
-            warning = (
-                f"{name} is planned to remain in {storage_class.label} for only "
-                f"~{archived_days:.0f} days, below its "
-                f"{storage_class.minimum_storage_duration_days}-day minimum storage "
-                "duration; early deletion/transition fees may apply."
-            )
-
-        results.append(
-            ArchiveClassResult(
-                file_type=name,
-                storage_class=assumption.archive_class,
-                monthly_cost_usd=monthly_cost,
-                months_in_archive=months_in_archive,
-                total_cost_usd=total_cost,
-                minimum_duration_warning=warning,
-                retrieval_characteristics=storage_class.retrieval_characteristics,
-                requires_restore=storage_class.requires_restore,
-            )
+    warning: str | None = None
+    archived_days = months_in_archive * APPROX_DAYS_PER_MONTH
+    if 0 < archived_days < storage_class.minimum_storage_duration_days:
+        warning = (
+            f"{dataset.name} is planned to remain in {storage_class.label} for only "
+            f"~{archived_days:.0f} days, below its "
+            f"{storage_class.minimum_storage_duration_days}-day minimum storage "
+            "duration; early deletion/transition fees may apply."
         )
 
-    aggregate_monthly = sum((r.monthly_cost_usd for r in results), Decimal(0))
-    aggregate_annual = aggregate_monthly * MONTHS_PER_YEAR
-    aggregate_total = sum((r.total_cost_usd for r in results), Decimal(0))
-    return results, aggregate_monthly, aggregate_annual, aggregate_total
+    result = DatasetStorageResult(
+        name=dataset.name,
+        archive_class=dataset.archive_class,
+        active_storage_cost_usd=active_cost,
+        months_in_archive=months_in_archive,
+        archive_monthly_cost_usd=archive_monthly_cost,
+        archive_total_cost_usd=archive_total_cost,
+        minimum_duration_warning=warning,
+        retrieval_characteristics=storage_class.retrieval_characteristics,
+        requires_restore=storage_class.requires_restore,
+    )
+    trace = TraceLine(
+        label=f"{dataset.name} storage ({storage_class.label})",
+        detail=(
+            f"Active: {envelope_gb} GB tiered @ S3 Standard rates x {active_months} month(s) "
+            f"= ${active_cost}; Archive: ${archive_monthly_cost}/month x {months_in_archive} "
+            f"months = ${archive_total_cost}"
+        ),
+    )
+    return result, trace
 
 
 def build_storage_cost_result(
-    inputs: ProjectInputs,
-    volumes: dict[str, FileTypeVolumeAssumption],
-    per_file_type_gb: dict[str, Decimal],
+    datasets: list[Dataset],
     raw_total_gb: Decimal,
-    envelope_gb: Decimal,
     planned_egress_gb: Decimal,
-    storage: StorageAssumptions,
+    headroom_fraction: Decimal,
+    retention_years: Decimal,
     pricing: PricingConfig,
 ) -> StorageCostResult:
-    """Assemble the full storage-cost result (active + archive + requests)."""
-    active_cost = active_storage_cost(envelope_gb, storage.active_months, pricing)
-    req_cost = request_cost(raw_total_gb, planned_egress_gb, pricing)
-    archive_results, archive_monthly, archive_annual, archive_total = archive_storage_cost(
-        inputs, volumes, per_file_type_gb, storage, pricing
-    )
+    """Assemble the full storage-cost result: active + archive storage
+    calculated independently per dataset then summed, plus one project-level
+    request-cost estimate (spec 006 §17)."""
+    retention_months = retention_years * MONTHS_PER_YEAR
 
-    trace = [
-        TraceLine(
-            label="Active S3 Standard storage",
-            detail=(
-                f"{envelope_gb} GB tiered @ S3 Standard rates x {storage.active_months} "
-                f"month(s) = ${active_cost}"
-            ),
-        ),
+    results: list[DatasetStorageResult] = []
+    trace: list[TraceLine] = []
+    for dataset in datasets:
+        result, dataset_trace = _dataset_storage_result(dataset, headroom_fraction, retention_months, pricing)
+        results.append(result)
+        trace.append(dataset_trace)
+
+    req_cost = request_cost(raw_total_gb, planned_egress_gb, pricing)
+    trace.append(
         TraceLine(
             label="S3/API/lifecycle requests",
             detail=(
                 f"Estimated from volume at {AVG_OBJECT_SIZE_GB} GB/object avg object size "
                 f"= ${req_cost}"
             ),
-        ),
-    ]
-    for r in archive_results:
-        trace.append(
-            TraceLine(
-                label=f"{r.file_type} archive ({r.storage_class})",
-                detail=(
-                    f"${r.monthly_cost_usd}/month x {r.months_in_archive} months = "
-                    f"${r.total_cost_usd}"
-                ),
-            )
         )
+    )
+
+    active_total = sum((r.active_storage_cost_usd for r in results), Decimal(0))
+    archive_monthly_total = sum((r.archive_monthly_cost_usd for r in results), Decimal(0))
+    archive_annual_total = archive_monthly_total * MONTHS_PER_YEAR
+    archive_total = sum((r.archive_total_cost_usd for r in results), Decimal(0))
 
     return StorageCostResult(
-        active_storage_cost_usd=active_cost,
+        datasets=results,
+        active_storage_cost_usd=active_total,
         request_cost_usd=req_cost,
-        archive_results=archive_results,
-        archive_monthly_cost_usd=archive_monthly,
-        archive_annual_cost_usd=archive_annual,
+        archive_monthly_cost_usd=archive_monthly_total,
+        archive_annual_cost_usd=archive_annual_total,
         archive_total_cost_usd=archive_total,
         trace=trace,
     )

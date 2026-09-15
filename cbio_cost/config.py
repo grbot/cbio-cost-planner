@@ -16,16 +16,16 @@ import yaml
 from cbio_cost.models import (
     STORAGE_CLASS_KEYS,
     CurrencyAssumptions,
+    Dataset,
     EgressPricing,
     EngineeringAssumptions,
     FileTypeVolumeAssumption,
-    MovementAssumptions,
     PriceTier,
     PricingConfig,
     ProjectInputs,
     RequestPricing,
-    StorageAssumptions,
     StorageClassPricing,
+    WgsMovementAssumptions,
 )
 
 
@@ -128,22 +128,64 @@ def load_currency_defaults(path: str | Path) -> CurrencyAssumptions:
     )
 
 
-class ProjectProfile:
-    """A fully-specified set of inputs/assumptions loaded from profiles YAML."""
+class WgsProfile:
+    """A fully-specified WGS 30x template loaded from profiles YAML: the
+    per-sample-volume/movement assumptions used to generate the project's
+    ``Dataset`` objects (spec 006 §3), plus the shared project/engineering
+    assumptions."""
 
     def __init__(
         self,
         project: ProjectInputs,
         volumes: dict[str, FileTypeVolumeAssumption],
-        storage: StorageAssumptions,
-        movement: MovementAssumptions,
+        active_months: Decimal,
+        movement: WgsMovementAssumptions,
         engineering: EngineeringAssumptions,
     ) -> None:
         self.project = project
         self.volumes = volumes
-        self.storage = storage
+        self.active_months = active_months
         self.movement = movement
         self.engineering = engineering
+
+
+def build_wgs_datasets(
+    num_samples: int,
+    volumes: dict[str, FileTypeVolumeAssumption],
+    movement: WgsMovementAssumptions,
+    active_months: Decimal,
+) -> list[Dataset]:
+    """Generate the WGS 30x template's FASTQ/CRAM/gVCF datasets (spec 006 §2-§3, §9).
+
+    FASTQ and gVCF/QC are read back in full on each pass; only a fraction of
+    CRAMs are typically retrieved.
+    """
+    return [
+        Dataset(
+            name="FASTQ",
+            size_gb=Decimal(num_samples) * volumes["FASTQ"].gb_per_sample,
+            retrieval_fraction=Decimal(1),
+            read_passes=movement.fastq_passes,
+            active_months=active_months,
+            archive_class=volumes["FASTQ"].archive_class,
+        ),
+        Dataset(
+            name="CRAM",
+            size_gb=Decimal(num_samples) * volumes["CRAM"].gb_per_sample,
+            retrieval_fraction=movement.cram_retrieval_fraction,
+            read_passes=movement.cram_retrieval_passes,
+            active_months=active_months,
+            archive_class=volumes["CRAM"].archive_class,
+        ),
+        Dataset(
+            name="gVCF",
+            size_gb=Decimal(num_samples) * volumes["gVCF"].gb_per_sample,
+            retrieval_fraction=Decimal(1),
+            read_passes=movement.gvcf_passes,
+            active_months=active_months,
+            archive_class=volumes["gVCF"].archive_class,
+        ),
+    ]
 
 
 def _parse_volumes(raw_volumes: dict[str, dict[str, Any]]) -> dict[str, FileTypeVolumeAssumption]:
@@ -157,46 +199,54 @@ def _parse_volumes(raw_volumes: dict[str, dict[str, Any]]) -> dict[str, FileType
     return volumes
 
 
-def _parse_movement(block: dict[str, Any]) -> MovementAssumptions:
-    return MovementAssumptions(
+def _parse_wgs_movement(block: dict[str, Any]) -> WgsMovementAssumptions:
+    return WgsMovementAssumptions(
         fastq_passes=_dec(block["fastq_passes"]),
         cram_retrieval_fraction=_percent_to_fraction(block["cram_retrieval_percent"]),
         cram_retrieval_passes=_dec(block["cram_retrieval_passes"]),
         gvcf_passes=_dec(block["gvcf_passes"]),
-        transfer_contingency=_percent_to_fraction(block["transfer_contingency_percent"]),
     )
 
 
-def load_profiles(path: str | Path) -> tuple[ProjectProfile, dict[str, MovementAssumptions]]:
+def load_profiles(
+    path: str | Path,
+) -> tuple[WgsProfile, dict[str, tuple[WgsMovementAssumptions, Decimal]]]:
     """Parse ``config/project-profiles.yaml``.
 
-    Returns the default project profile plus a mapping of scenario name ->
-    movement-assumption overlay for the sensitivity-analysis comparison.
+    Returns the default WGS 30x profile plus a mapping of scenario name ->
+    (movement overlay, transfer contingency) for the sensitivity-analysis
+    comparison (spec §13). Scenarios are returned as raw overlays rather than
+    pre-built datasets so the caller can combine them with the *current*
+    (possibly user-edited) sample count/volumes/archive classes — only the
+    movement behaviour and contingency vary between scenarios.
     """
     raw = yaml.safe_load(Path(path).read_text())
     default_block = raw["default_profile"]
 
+    num_samples = int(default_block["project"]["num_samples"])
+    volumes = _parse_volumes(default_block["volumes"])
+    active_months = _dec(default_block["storage"]["active_months"])
+
     project = ProjectInputs(
         project_name=str(default_block["project"]["project_name"]),
         project_type=str(default_block["project"]["project_type"]),
-        num_samples=int(default_block["project"]["num_samples"]),
-        depth_label=str(default_block["project"]["depth_label"]),
         retention_years=_dec(default_block["project"]["retention_years"]),
-    )
-    volumes = _parse_volumes(default_block["volumes"])
-    storage = StorageAssumptions(
+        transfer_contingency=_percent_to_fraction(default_block["transfer"]["contingency_percent"]),
         headroom_fraction=_percent_to_fraction(default_block["storage"]["headroom_percent"]),
-        active_months=_dec(default_block["storage"]["active_months"]),
+        num_samples=num_samples,
     )
-    movement = _parse_movement(default_block["movement"])
+    movement = _parse_wgs_movement(default_block["movement"])
     engineering = EngineeringAssumptions(
         onboarding_hours=_dec(default_block["engineering"]["onboarding_hours"]),
         operations_hours_per_year=_dec(default_block["engineering"]["operations_hours_per_year"]),
         closeout_hours=_dec(default_block["engineering"]["closeout_hours"]),
         hourly_rate_zar=_dec(default_block["engineering"]["hourly_rate_zar"]),
     )
-    profile = ProjectProfile(project, volumes, storage, movement, engineering)
+    profile = WgsProfile(project, volumes, active_months, movement, engineering)
 
-    scenarios = {name: _parse_movement(block) for name, block in raw["scenarios"].items()}
+    scenarios: dict[str, tuple[WgsMovementAssumptions, Decimal]] = {
+        name: (_parse_wgs_movement(block), _percent_to_fraction(block["transfer_contingency_percent"]))
+        for name, block in raw["scenarios"].items()
+    }
 
     return profile, scenarios

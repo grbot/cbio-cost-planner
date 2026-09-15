@@ -424,6 +424,43 @@ div[data-testid="stSelectbox"] button[aria-label="Open"]:hover {{
 [data-testid="stArrowVegaLiteChart"] {{
     background-color: transparent;
 }}
+
+/* Project-mode selector (see mode_tabs() below) — a horizontal radio
+   styled as a pair of clean, native-feeling GRO tabs. Real st.tabs() has no
+   way to report which tab is active back to Python, so a horizontal radio
+   is used instead where the active mode must drive server-side branching. */
+div[data-testid="stRadio"][class*="st-key-project_mode"] > label {{
+    display: none;
+}}
+div[data-testid="stRadio"][class*="st-key-project_mode"] div[role="radiogroup"] {{
+    display: flex;
+    gap: 0.5rem;
+    border-bottom: 1px solid {BORDER};
+    margin-bottom: 1.25rem;
+}}
+div[data-testid="stRadio"][class*="st-key-project_mode"] label {{
+    background: transparent;
+    border: none;
+    border-bottom: 3px solid transparent;
+    border-radius: 0;
+    padding: 0.6rem 0.25rem;
+    margin-bottom: -1px;
+}}
+div[data-testid="stRadio"][class*="st-key-project_mode"] label p {{
+    font-family: {FONT_STACK_HEADING};
+    font-weight: 600;
+    font-size: 1.05rem;
+    color: {MUTED};
+}}
+div[data-testid="stRadio"][class*="st-key-project_mode"] label:has(input:checked) {{
+    border-bottom-color: {TEAL};
+}}
+div[data-testid="stRadio"][class*="st-key-project_mode"] label:has(input:checked) p {{
+    color: {NAVY};
+}}
+div[data-testid="stRadio"][class*="st-key-project_mode"] label div:first-child {{
+    display: none;
+}}
 </style>
 """
 

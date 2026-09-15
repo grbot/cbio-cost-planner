@@ -1,16 +1,22 @@
-"""Serialize a CostEstimate to CSV, JSON, and Markdown (spec §18)."""
+"""Serialize a CostEstimate to CSV, JSON, and Markdown (spec §18; spec 006 §21)."""
 
 from __future__ import annotations
 
 import csv
 import io
 import json
-from dataclasses import asdict
 from decimal import Decimal
 from typing import Any
 
 from cbio_cost.models import CostEstimate, PricingConfig
 from cbio_cost.units import gb_to_tb
+
+STORAGE_CLASS_LABELS = {
+    "s3_standard": "S3 Standard",
+    "glacier_instant": "Glacier Instant Retrieval",
+    "glacier_flexible": "Glacier Flexible Retrieval",
+    "glacier_deep_archive": "Glacier Deep Archive",
+}
 
 
 def _json_default(value: Any) -> Any:
@@ -37,9 +43,22 @@ def to_csv(estimate: CostEstimate, pricing: PricingConfig) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(["Project", estimate.inputs.project_name])
-    writer.writerow(["Project type", estimate.inputs.project_type])
-    writer.writerow(["Samples", estimate.inputs.num_samples])
+    writer.writerow(["Project mode", estimate.inputs.project_type])
     writer.writerow(["Retention (years)", estimate.inputs.retention_years])
+    writer.writerow([])
+    writer.writerow(["Datasets", str(len(estimate.datasets))])
+    writer.writerow(["Dataset", "Size (GB)", "Retrieval %", "Passes", "Active (months)", "Archive class"])
+    for d in estimate.datasets:
+        writer.writerow(
+            [
+                d.name,
+                str(d.size_gb),
+                str(d.retrieval_fraction * 100),
+                str(d.read_passes),
+                str(d.active_months),
+                STORAGE_CLASS_LABELS.get(d.archive_class, d.archive_class),
+            ]
+        )
     writer.writerow([])
     writer.writerow(["Cost component", "Amount (ZAR)", "Note"])
     for item in estimate.line_items:
@@ -53,18 +72,33 @@ def to_csv(estimate: CostEstimate, pricing: PricingConfig) -> str:
 
 
 def to_json(estimate: CostEstimate, pricing: PricingConfig) -> str:
-    """Render the full estimate (including per-file-type detail) as JSON text."""
+    """Render the full estimate (including per-dataset detail) as JSON text."""
     payload = {
-        "project": asdict(estimate.inputs),
+        "project": {
+            "project_name": estimate.inputs.project_name,
+            "project_type": estimate.inputs.project_type,
+            "num_samples": estimate.inputs.num_samples,
+            "retention_years": str(estimate.inputs.retention_years),
+            "transfer_contingency_percent": str(estimate.inputs.transfer_contingency * 100),
+            "headroom_percent": str(estimate.inputs.headroom_fraction * 100),
+        },
+        "datasets": [
+            {
+                "name": d.name,
+                "size_gb": str(d.size_gb),
+                "retrieval_percent": str(d.retrieval_fraction * 100),
+                "read_passes": str(d.read_passes),
+                "active_months": str(d.active_months),
+                "archive_class": STORAGE_CLASS_LABELS.get(d.archive_class, d.archive_class),
+            }
+            for d in estimate.datasets
+        ],
         "volume": {
-            "per_file_type_gb": {k: str(v) for k, v in estimate.volume.per_file_type_gb.items()},
             "raw_total_gb": str(estimate.volume.raw_total_gb),
             "envelope_gb": str(estimate.volume.envelope_gb),
         },
         "transfer": {
-            "per_file_type_egress_gb": {
-                k: str(v) for k, v in estimate.transfer.per_file_type_egress_gb.items()
-            },
+            "per_dataset_egress_gb": {d.name: str(d.base_egress_gb) for d in estimate.transfer.datasets},
             "base_egress_gb": str(estimate.transfer.base_egress_gb),
             "planned_egress_gb": str(estimate.transfer.planned_egress_gb),
             "egress_cost_usd": str(estimate.transfer.egress_cost_usd),
@@ -104,16 +138,32 @@ def to_markdown(estimate: CostEstimate, pricing: PricingConfig) -> str:
     lines = [
         f"# {inputs.project_name} — Infrastructure Cost Estimate",
         "",
-        f"- Project type: {inputs.project_type}",
-        f"- Samples: {inputs.num_samples}",
-        f"- Retention: {inputs.retention_years} years",
-        f"- Durable data: {raw_tb:.1f} TB",
-        f"- Provisioned envelope: {envelope_tb:.1f} TB",
-        f"- Expected AWS egress: {egress_tb:.1f} TB",
-        "",
-        "| Cost component | Cost (ZAR) |",
-        "|---|---:|",
+        f"- Project mode: {inputs.project_type}",
     ]
+    if inputs.num_samples is not None:
+        lines.append(f"- Samples: {inputs.num_samples}")
+    lines.extend(
+        [
+            f"- Retention: {inputs.retention_years} years",
+            f"- Datasets: {len(estimate.datasets)}",
+            f"- Durable data: {raw_tb:.1f} TB",
+            f"- Provisioned envelope: {envelope_tb:.1f} TB",
+            f"- Expected AWS egress: {egress_tb:.1f} TB",
+            "",
+            "## Datasets",
+            "",
+            "| Dataset | Size (GB) | Retrieval | Passes | Active (months) | Archive class |",
+            "|---|---:|---:|---:|---:|---|",
+        ]
+    )
+    for d in estimate.datasets:
+        lines.append(
+            f"| {d.name} | {d.size_gb:,.0f} | {d.retrieval_fraction * 100:.0f}% | {d.read_passes} | "
+            f"{d.active_months} | {STORAGE_CLASS_LABELS.get(d.archive_class, d.archive_class)} |"
+        )
+    lines.append("")
+    lines.append("| Cost component | Cost (ZAR) |")
+    lines.append("|---|---:|")
     for item in estimate.line_items:
         lines.append(f"| {item.label} | R{item.amount_zar:,.2f} |")
     lines.append("| Compute | Not included |")

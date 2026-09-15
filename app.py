@@ -3,10 +3,16 @@
 This module only reads widget inputs, builds the typed assumption objects
 from ``cbio_cost.models``, calls into ``cbio_cost.calculator`` for every
 calculation, and renders the results. No arithmetic happens here.
+
+Two project modes are supported (spec 006): WGS 30x (a predefined template
+that generates datasets from a sample count) and Custom Project (datasets
+entered directly). Both reduce to the same ``list[Dataset]`` before reaching
+the shared calculation engine — see cbio_cost/calculator.py.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -17,23 +23,24 @@ import theme
 from cbio_cost import config as cost_config
 from cbio_cost import export as cost_export
 from cbio_cost.calculator import build_estimate, build_scenarios, explain_result
+from cbio_cost.export import STORAGE_CLASS_LABELS
 from cbio_cost.models import (
+    WGS_FILE_TYPES,
     CurrencyAssumptions,
+    Dataset,
     EngineeringAssumptions,
     FileTypeVolumeAssumption,
-    MovementAssumptions,
     ProjectInputs,
-    StorageAssumptions,
+    ScenarioAssumptions,
+    WgsMovementAssumptions,
 )
 from cbio_cost.units import gb_to_tb
 
 CONFIG_DIR = Path(__file__).resolve().parent / "config"
-STORAGE_CLASS_LABELS = {
-    "s3_standard": "S3 Standard",
-    "glacier_instant": "Glacier Instant Retrieval",
-    "glacier_flexible": "Glacier Flexible Retrieval",
-    "glacier_deep_archive": "Glacier Deep Archive",
-}
+GB_PER_TB = Decimal(1024)
+CUSTOM_MAX_DATASETS = 20
+WGS_MODE = "WGS 30×"
+CUSTOM_MODE = "Custom Project"
 
 st.set_page_config(page_title="CBIO Infrastructure Cost Planner", layout="wide")
 theme.inject()
@@ -54,22 +61,69 @@ def _load_profile_and_scenarios():
     return cost_config.load_profiles(CONFIG_DIR / "project-profiles.yaml")
 
 
+def _dec(value) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        return Decimal(0)
+
+
+# ---------------------------------------------------------------------------
+# Custom Project dataset session-state management (spec 006 §10-§12)
+# ---------------------------------------------------------------------------
+
+
+def _seed_custom_dataset_defaults(dataset_id: int, name: str) -> None:
+    st.session_state[f"custom_name_{dataset_id}"] = name
+    st.session_state[f"custom_size_{dataset_id}"] = 1.0
+    st.session_state[f"custom_unit_{dataset_id}"] = "TB"
+    st.session_state[f"custom_retrieval_{dataset_id}"] = 100.0
+    st.session_state[f"custom_passes_{dataset_id}"] = 1.0
+    st.session_state[f"custom_active_months_{dataset_id}"] = 1.0
+    st.session_state[f"custom_archive_{dataset_id}"] = "glacier_flexible"
+
+
+def _init_custom_datasets() -> None:
+    if "custom_dataset_ids" not in st.session_state:
+        st.session_state["custom_dataset_ids"] = [1]
+        st.session_state["custom_next_id"] = 2
+        _seed_custom_dataset_defaults(1, "Dataset 1")
+
+
+def _add_custom_dataset() -> None:
+    ids = st.session_state["custom_dataset_ids"]
+    if len(ids) >= CUSTOM_MAX_DATASETS:
+        return
+    new_id = st.session_state["custom_next_id"]
+    st.session_state["custom_next_id"] += 1
+    ids.append(new_id)
+    _seed_custom_dataset_defaults(new_id, f"Dataset {len(ids)}")
+
+
+def _remove_custom_dataset(dataset_id: int) -> None:
+    ids = st.session_state["custom_dataset_ids"]
+    if dataset_id in ids and len(ids) > 1:
+        ids.remove(dataset_id)
+
+
+_init_custom_datasets()
+
+
 def _default_state() -> dict:
-    profile, scenarios = _load_profile_and_scenarios()
+    profile, _scenarios = _load_profile_and_scenarios()
     currency = cost_config.load_currency_defaults(CONFIG_DIR / "aws-pricing.yaml")
     state = {
+        "project_mode": WGS_MODE,
         "project_name": profile.project.project_name,
-        "project_type": profile.project.project_type,
         "num_samples": profile.project.num_samples,
-        "depth_label": profile.project.depth_label,
         "retention_years": float(profile.project.retention_years),
-        "headroom_percent": float(profile.storage.headroom_fraction * 100),
-        "active_months": float(profile.storage.active_months),
+        "headroom_percent": float(profile.project.headroom_fraction * 100),
+        "active_months": float(profile.active_months),
         "fastq_passes": float(profile.movement.fastq_passes),
         "cram_retrieval_percent": float(profile.movement.cram_retrieval_fraction * 100),
         "cram_retrieval_passes": float(profile.movement.cram_retrieval_passes),
         "gvcf_passes": float(profile.movement.gvcf_passes),
-        "transfer_contingency_percent": float(profile.movement.transfer_contingency * 100),
+        "transfer_contingency_percent": float(profile.project.transfer_contingency * 100),
         "onboarding_hours": float(profile.engineering.onboarding_hours),
         "operations_hours_per_year": float(profile.engineering.operations_hours_per_year),
         "closeout_hours": float(profile.engineering.closeout_hours),
@@ -100,106 +154,189 @@ st.caption(
 st.button("Load 500 x 30x WGS / 5-year demo profile", key="load_demo_button", on_click=_load_demo_profile)
 
 pricing = _load_pricing()
-_, scenario_movements = _load_profile_and_scenarios()
+_, wgs_scenario_overlays = _load_profile_and_scenarios()
+
+# ---------------------------------------------------------------------------
+# Project mode (spec 006 §1)
+# ---------------------------------------------------------------------------
+st.radio(
+    "Project mode",
+    options=[WGS_MODE, CUSTOM_MODE],
+    key="project_mode",
+    horizontal=True,
+    label_visibility="collapsed",
+)
+is_wgs_mode = st.session_state["project_mode"] == WGS_MODE
 
 # ---------------------------------------------------------------------------
 # 1. Project
 # ---------------------------------------------------------------------------
 with st.container(border=True, key="section_1"):
     theme.section_header(1, "Project")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        st.text_input("Project name", key="project_name")
-    with col2:
-        st.selectbox("Project type", options=["WGS 30x"], key="project_type")
-    with col3:
-        st.number_input("Number of samples", min_value=1, step=1, key="num_samples")
-    with col4:
-        st.text_input("Sequencing depth", key="depth_label")
-    with col5:
-        st.number_input("Retention period (years)", min_value=0.1, step=0.5, key="retention_years")
+    if is_wgs_mode:
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.text_input("Project name", key="project_name")
+        with col2:
+            st.number_input("Number of samples", min_value=1, step=1, key="num_samples")
+        with col3:
+            st.number_input("Retention period (years)", min_value=0.1, step=0.5, key="retention_years")
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.text_input("Project name", key="project_name")
+        with col2:
+            st.number_input("Retention period (years)", min_value=0.1, step=0.5, key="retention_years")
 
 # ---------------------------------------------------------------------------
-# 2. Data volume assumptions
+# 2. Project datasets (mode-dependent construction, spec 006 §1-§4)
 # ---------------------------------------------------------------------------
 with st.container(border=True, key="section_2"):
-    theme.section_header(2, "Data volume assumptions")
-    st.caption("All assumptions below are editable planning defaults, not measured data.")
+    if is_wgs_mode:
+        theme.section_header(2, "WGS 30x data volume & movement")
+        st.caption(
+            "The WGS 30x profile already assumes 30x sequencing depth — per-sample volumes "
+            "below already reflect that and are not scaled again."
+        )
+        with st.expander("Advanced WGS assumptions"):
+            st.caption("Editable planning defaults, not measured data.")
+            vol_cols = st.columns(3)
+            for col, file_type in zip(vol_cols, WGS_FILE_TYPES):
+                with col:
+                    st.number_input(
+                        f"{file_type} GB/sample",
+                        min_value=0.0,
+                        step=1.0,
+                        key=f"vol_{file_type}",
+                    )
+            st.number_input("Storage headroom (%)", min_value=0.0, step=1.0, key="headroom_percent")
 
-    vol_cols = st.columns(3)
-    for col, file_type in zip(vol_cols, ("FASTQ", "CRAM", "gVCF")):
-        with col:
-            st.number_input(
-                f"{file_type} GB/sample",
-                min_value=0.0,
-                step=1.0,
-                key=f"vol_{file_type}",
+            st.markdown("**FASTQ** — moves AWS S3 -> Ilifu for primary processing.")
+            st.number_input("FASTQ processing passes", min_value=0.0, step=1.0, key="fastq_passes")
+
+            st.markdown("**CRAM** — moves Ilifu -> S3; only a fraction are later retrieved.")
+            mcol1, mcol2 = st.columns(2)
+            with mcol1:
+                st.number_input(
+                    "CRAM retrieval fraction (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=1.0,
+                    key="cram_retrieval_percent",
+                )
+            with mcol2:
+                st.number_input("CRAM retrieval passes", min_value=0.0, step=1.0, key="cram_retrieval_passes")
+
+            st.markdown("**gVCF** — may move back to Ilifu for cohort joint calling.")
+            st.number_input("gVCF processing/retrieval passes", min_value=0.0, step=1.0, key="gvcf_passes")
+
+            st.caption(
+                "Data does not need to move to a separate bucket — the same S3 object key can "
+                "transition storage class via an S3 Lifecycle rule."
             )
+            arc_cols = st.columns(3)
+            for col, file_type in zip(arc_cols, WGS_FILE_TYPES):
+                with col:
+                    st.selectbox(
+                        f"{file_type} archive class",
+                        options=list(STORAGE_CLASS_LABELS.keys()),
+                        format_func=lambda k: STORAGE_CLASS_LABELS[k],
+                        key=f"archive_{file_type}",
+                    )
 
-    st.number_input("Storage headroom (%)", min_value=0.0, step=1.0, key="headroom_percent")
+            st.number_input("Active S3 Standard period (months)", min_value=0.0, step=1.0, key="active_months")
+    else:
+        theme.section_header(2, "Custom Project datasets")
+        st.caption(
+            "Define one or more datasets and describe how each dataset will be stored and "
+            "accessed. Use this mode for projects that do not yet have a predefined CBIO "
+            "project profile."
+        )
+        ids = st.session_state["custom_dataset_ids"]
+        for i, dataset_id in enumerate(ids):
+            display_name = st.session_state.get(f"custom_name_{dataset_id}", "").strip()
+            title = f"Dataset {i + 1} — {display_name}" if display_name else f"Dataset {i + 1}"
+            with st.expander(title, expanded=(i == 0)):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.text_input("Dataset name", key=f"custom_name_{dataset_id}")
+                with col2:
+                    st.selectbox("Unit", options=["GB", "TB"], key=f"custom_unit_{dataset_id}")
+
+                col3, col4 = st.columns(2)
+                with col3:
+                    st.number_input("Size", min_value=0.0, step=1.0, key=f"custom_size_{dataset_id}")
+                with col4:
+                    unit = st.session_state[f"custom_unit_{dataset_id}"]
+                    size = _dec(st.session_state[f"custom_size_{dataset_id}"])
+                    gb_value = size * GB_PER_TB if unit == "TB" else size
+                    st.caption(f"{size:g} {unit} = {gb_value:,.0f} GB")
+
+                col5, col6 = st.columns(2)
+                with col5:
+                    st.number_input(
+                        "Retrieval (%)",
+                        min_value=0.0,
+                        max_value=100.0,
+                        step=1.0,
+                        key=f"custom_retrieval_{dataset_id}",
+                        help=(
+                            "Proportion of this dataset expected to be read from object "
+                            "storage during one workflow pass. 100% = entire dataset is read; "
+                            "0% = stored but not normally retrieved."
+                        ),
+                    )
+                with col6:
+                    st.number_input(
+                        "Read passes",
+                        min_value=0.0,
+                        step=1.0,
+                        key=f"custom_passes_{dataset_id}",
+                        help="How many times the selected retrieval fraction is expected to be read.",
+                    )
+
+                col7, col8 = st.columns(2)
+                with col7:
+                    st.number_input(
+                        "Active storage duration (months)",
+                        min_value=0.0,
+                        step=1.0,
+                        key=f"custom_active_months_{dataset_id}",
+                        help="Months this dataset remains in S3 Standard before being archived.",
+                    )
+                with col8:
+                    st.selectbox(
+                        "Archive class",
+                        options=list(STORAGE_CLASS_LABELS.keys()),
+                        format_func=lambda k: STORAGE_CLASS_LABELS[k],
+                        key=f"custom_archive_{dataset_id}",
+                    )
+
+                if i > 0:
+                    st.button(
+                        "Remove dataset",
+                        key=f"custom_remove_{dataset_id}",
+                        on_click=_remove_custom_dataset,
+                        args=(dataset_id,),
+                    )
+
+        add_disabled = len(ids) >= CUSTOM_MAX_DATASETS
+        st.button("+ Add dataset", on_click=_add_custom_dataset, disabled=add_disabled)
+        if add_disabled:
+            st.caption(f"Maximum of {CUSTOM_MAX_DATASETS} datasets reached.")
 
 # ---------------------------------------------------------------------------
-# 3. Data movement model
+# 3. Data movement & transfer (project-level, shared by both modes)
 # ---------------------------------------------------------------------------
 with st.container(border=True, key="section_3"):
-    theme.section_header(3, "Data movement model")
-    st.markdown("**FASTQ** — moves AWS S3 -> Ilifu for primary processing.")
-    st.number_input("FASTQ processing passes", min_value=0.0, step=1.0, key="fastq_passes")
-
-    st.markdown("**CRAM** — moves Ilifu -> S3; only a fraction are later retrieved.")
-    mcol1, mcol2 = st.columns(2)
-    with mcol1:
-        st.number_input(
-            "CRAM retrieval fraction (%)", min_value=0.0, max_value=100.0, step=1.0, key="cram_retrieval_percent"
-        )
-    with mcol2:
-        st.number_input("CRAM retrieval passes", min_value=0.0, step=1.0, key="cram_retrieval_passes")
-
-    st.markdown("**gVCF** — may move back to Ilifu for cohort joint calling.")
-    st.number_input("gVCF processing/retrieval passes", min_value=0.0, step=1.0, key="gvcf_passes")
-
-    st.markdown("**Transfer contingency** — covers reprocessing, failed/restarted transfers, workflow changes, QC.")
-    st.number_input("Transfer contingency (%)", min_value=0.0, step=1.0, key="transfer_contingency_percent")
-
-# ---------------------------------------------------------------------------
-# 4. Archive storage class selection (grouped with data volume for UI flow)
-# ---------------------------------------------------------------------------
-with st.container(border=True, key="section_4"):
-    theme.section_header(4, "Archive storage class per file type")
-    st.caption(
-        "Data does not need to move to a separate bucket — the same S3 object key can "
-        "transition storage class via an S3 Lifecycle rule."
-    )
-    theme.process_diagram(
-        ["S3 Standard", "Processing / validation", "Lifecycle transition", "Glacier"],
-        accent_indices={2},
-    )
-    st.caption(
-        "For Flexible Retrieval and Deep Archive, objects must normally be restored "
-        "before being read. Glacier Instant Retrieval can be read directly but has "
-        "retrieval charges."
-    )
-    arc_cols = st.columns(3)
-    for col, file_type in zip(arc_cols, ("FASTQ", "CRAM", "gVCF")):
-        with col:
-            st.selectbox(
-                f"{file_type} archive class",
-                options=list(STORAGE_CLASS_LABELS.keys()),
-                format_func=lambda k: STORAGE_CLASS_LABELS[k],
-                key=f"archive_{file_type}",
-            )
-
-# ---------------------------------------------------------------------------
-# 5. Active storage + AWS transfer settings
-# ---------------------------------------------------------------------------
-with st.container(border=True, key="section_5"):
-    theme.section_header(5, "Active S3 storage & AWS transfer")
-    st.number_input("Active S3 Standard period (months)", min_value=0.0, step=1.0, key="active_months")
+    theme.section_header(3, "Data movement & transfer")
     st.caption(
         "Data transferred into AWS: AWS internet data-transfer charge: $0. This does not "
         "mean S3 PUT/API requests are free — request and lifecycle-transition costs are "
         "modelled separately below."
     )
+    st.markdown("**Transfer contingency** — covers reprocessing, failed/restarted transfers, workflow changes, QC.")
+    st.number_input("Transfer contingency (%)", min_value=0.0, step=1.0, key="transfer_contingency_percent")
     theme.callout(
         "Key implication",
         "AWS-to-Ilifu transfer over the public internet can be a major project cost and "
@@ -207,10 +344,10 @@ with st.container(border=True, key="section_5"):
     )
 
 # ---------------------------------------------------------------------------
-# 6. Infrastructure engineering
+# 4. Infrastructure engineering
 # ---------------------------------------------------------------------------
-with st.container(border=True, key="section_6"):
-    theme.section_header(6, "Infrastructure engineering / management")
+with st.container(border=True, key="section_4"):
+    theme.section_header(4, "Infrastructure engineering / management")
     _current_rate = st.session_state.get("hourly_rate_zar", 0)
     theme.callout(
         f"Illustrative engineering rate: R{_current_rate:,.0f}/hour",
@@ -228,10 +365,10 @@ with st.container(border=True, key="section_6"):
         st.number_input("Hourly rate (ZAR)", min_value=0.0, step=50.0, key="hourly_rate_zar")
 
 # ---------------------------------------------------------------------------
-# 7. Ilifu compute
+# 5. Ilifu compute
 # ---------------------------------------------------------------------------
-with st.container(border=True, key="section_7"):
-    theme.section_header(7, "Ilifu compute")
+with st.container(border=True, key="section_5"):
+    theme.section_header(5, "Ilifu compute")
     theme.callout("Compute cost not yet included", "Compute cost / entitlement not yet included.")
     st.caption(
         "Future versions should model project classes such as CBIO core, CBIO "
@@ -242,10 +379,10 @@ with st.container(border=True, key="section_7"):
     )
 
 # ---------------------------------------------------------------------------
-# 8. Currency
+# 6. Currency
 # ---------------------------------------------------------------------------
-with st.container(border=True, key="section_8"):
-    theme.section_header(8, "Currency assumptions")
+with st.container(border=True, key="section_6"):
+    theme.section_header(6, "Currency assumptions")
     ccol1, ccol2 = st.columns(2)
     with ccol1:
         st.number_input("USD/ZAR exchange rate", min_value=0.01, step=0.05, key="usd_zar")
@@ -257,40 +394,55 @@ with st.container(border=True, key="section_8"):
 # Build inputs -> run calculation
 # ---------------------------------------------------------------------------
 
-
-def _dec(value) -> Decimal:
-    try:
-        return Decimal(str(value))
-    except InvalidOperation:
-        return Decimal(0)
-
-
 try:
+    if is_wgs_mode:
+        project_type = "WGS 30x"
+        num_samples = int(st.session_state["num_samples"])
+        volumes = {
+            file_type: FileTypeVolumeAssumption(
+                name=file_type,
+                gb_per_sample=_dec(st.session_state[f"vol_{file_type}"]),
+                archive_class=st.session_state[f"archive_{file_type}"],
+            )
+            for file_type in WGS_FILE_TYPES
+        }
+        wgs_movement = WgsMovementAssumptions(
+            fastq_passes=_dec(st.session_state["fastq_passes"]),
+            cram_retrieval_fraction=_dec(st.session_state["cram_retrieval_percent"]) / Decimal(100),
+            cram_retrieval_passes=_dec(st.session_state["cram_retrieval_passes"]),
+            gvcf_passes=_dec(st.session_state["gvcf_passes"]),
+        )
+        active_months = _dec(st.session_state["active_months"])
+        datasets = cost_config.build_wgs_datasets(num_samples, volumes, wgs_movement, active_months)
+        headroom_fraction = _dec(st.session_state["headroom_percent"]) / Decimal(100)
+    else:
+        project_type = "Custom Project"
+        num_samples = None
+        headroom_fraction = Decimal(0)
+        datasets = []
+        for dataset_id in st.session_state["custom_dataset_ids"]:
+            unit = st.session_state[f"custom_unit_{dataset_id}"]
+            size = _dec(st.session_state[f"custom_size_{dataset_id}"])
+            size_gb = size * GB_PER_TB if unit == "TB" else size
+            datasets.append(
+                Dataset(
+                    name=st.session_state[f"custom_name_{dataset_id}"],
+                    size_gb=size_gb,
+                    retrieval_fraction=_dec(st.session_state[f"custom_retrieval_{dataset_id}"]) / Decimal(100),
+                    read_passes=_dec(st.session_state[f"custom_passes_{dataset_id}"]),
+                    active_months=_dec(st.session_state[f"custom_active_months_{dataset_id}"]),
+                    archive_class=st.session_state[f"custom_archive_{dataset_id}"],
+                )
+            )
+
+    transfer_contingency = _dec(st.session_state["transfer_contingency_percent"]) / Decimal(100)
     inputs = ProjectInputs(
         project_name=st.session_state["project_name"] or "Untitled project",
-        project_type=st.session_state["project_type"],
-        num_samples=int(st.session_state["num_samples"]),
-        depth_label=st.session_state["depth_label"],
+        project_type=project_type,
         retention_years=_dec(st.session_state["retention_years"]),
-    )
-    volumes = {
-        file_type: FileTypeVolumeAssumption(
-            name=file_type,
-            gb_per_sample=_dec(st.session_state[f"vol_{file_type}"]),
-            archive_class=st.session_state[f"archive_{file_type}"],
-        )
-        for file_type in ("FASTQ", "CRAM", "gVCF")
-    }
-    storage_assumptions = StorageAssumptions(
-        headroom_fraction=_dec(st.session_state["headroom_percent"]) / Decimal(100),
-        active_months=_dec(st.session_state["active_months"]),
-    )
-    movement = MovementAssumptions(
-        fastq_passes=_dec(st.session_state["fastq_passes"]),
-        cram_retrieval_fraction=_dec(st.session_state["cram_retrieval_percent"]) / Decimal(100),
-        cram_retrieval_passes=_dec(st.session_state["cram_retrieval_passes"]),
-        gvcf_passes=_dec(st.session_state["gvcf_passes"]),
-        transfer_contingency=_dec(st.session_state["transfer_contingency_percent"]) / Decimal(100),
+        transfer_contingency=transfer_contingency,
+        headroom_fraction=headroom_fraction,
+        num_samples=num_samples,
     )
     engineering = EngineeringAssumptions(
         onboarding_hours=_dec(st.session_state["onboarding_hours"]),
@@ -303,31 +455,71 @@ try:
         vat_fraction=_dec(st.session_state["vat_percent"]) / Decimal(100),
     )
 
-    estimate = build_estimate(inputs, volumes, storage_assumptions, movement, engineering, pricing, currency)
+    estimate = build_estimate(inputs, datasets, engineering, pricing, currency)
     estimate.explanation = explain_result(estimate)
+
+    # Sensitivity scenarios (spec 006 §19): built from the *current* (possibly
+    # edited) datasets, varying only movement behaviour and contingency.
+    if is_wgs_mode:
+        scenarios = {
+            name: ScenarioAssumptions(
+                datasets=cost_config.build_wgs_datasets(num_samples, volumes, movement, active_months),
+                transfer_contingency=contingency,
+            )
+            for name, (movement, contingency) in wgs_scenario_overlays.items()
+        }
+    else:
+        scenario_multipliers = {"Low movement": Decimal("0.5"), "Expected": Decimal("1"), "High movement": Decimal("2")}
+        scenarios = {
+            name: ScenarioAssumptions(
+                datasets=[replace(d, read_passes=d.read_passes * multiplier) for d in datasets],
+                transfer_contingency=transfer_contingency * multiplier,
+            )
+            for name, multiplier in scenario_multipliers.items()
+        }
+    scenario_estimates = build_scenarios(inputs, engineering, pricing, currency, scenarios)
 except ValueError as exc:
     st.error(f"Invalid input: {exc}")
     st.stop()
 
 # ---------------------------------------------------------------------------
-# 9. Cost output
+# 7. Cost output
 # ---------------------------------------------------------------------------
-with st.container(border=True, key="section_9"):
-    theme.section_header(9, "Cost summary")
+with st.container(border=True, key="section_7"):
+    theme.section_header(7, "Cost summary")
 
     raw_tb = gb_to_tb(estimate.volume.raw_total_gb)
     envelope_tb = gb_to_tb(estimate.volume.envelope_gb)
     egress_tb = gb_to_tb(estimate.transfer.planned_egress_gb)
 
-    scol1, scol2, scol3 = st.columns(3)
-    scol1.metric("Durable data", f"{raw_tb:.1f} TB")
-    scol2.metric("Provisioned envelope", f"{envelope_tb:.1f} TB")
-    scol3.metric("Expected AWS egress", f"{egress_tb:.1f} TB")
+    scol1, scol2, scol3, scol4 = st.columns(4)
+    scol1.metric("Datasets", str(len(estimate.datasets)))
+    scol2.metric("Durable project data", f"{raw_tb:.1f} TB")
+    scol3.metric("Provisioned envelope", f"{envelope_tb:.1f} TB")
+    scol4.metric("Planned workflow egress", f"{egress_tb:.1f} TB")
 
     theme.headline(
         "Estimated infrastructure cost",
         f"R{estimate.grand_total_zar:,.0f}",
         "Storage • Transfer • Archive • Engineering — compute not yet included",
+    )
+
+    st.markdown("**Dataset summary**")
+    dataset_rows = [
+        [
+            d.name,
+            f"{gb_to_tb(d.size_gb):.2f} TB" if d.size_gb >= GB_PER_TB else f"{d.size_gb:,.0f} GB",
+            f"{d.retrieval_fraction * 100:.0f}%",
+            f"{d.read_passes:g}",
+            f"{d.active_months:g} mo",
+            STORAGE_CLASS_LABELS.get(d.archive_class, d.archive_class),
+        ]
+        for d in estimate.datasets
+    ]
+    theme.table(
+        columns=["Dataset", "Size", "Retrieval", "Passes", "Active", "Archive"],
+        rows=dataset_rows,
+        align=["left", "right", "right", "right", "right", "left"],
     )
 
     TOTAL_LABEL = "Total project infrastructure cost"
@@ -364,15 +556,12 @@ with st.container(border=True, key="section_9"):
     st.bar_chart(chart_df, color=[theme.TEAL])
 
 # ---------------------------------------------------------------------------
-# 10. Sensitivity analysis
+# 8. Sensitivity analysis
 # ---------------------------------------------------------------------------
-with st.container(border=True, key="section_10"):
-    theme.section_header(10, "Sensitivity analysis")
+with st.container(border=True, key="section_8"):
+    theme.section_header(8, "Sensitivity analysis")
     st.caption("Demonstrates that transfer behaviour can materially change total project cost.")
 
-    scenario_estimates = build_scenarios(
-        inputs, volumes, storage_assumptions, engineering, pricing, currency, scenario_movements
-    )
     sensitivity_rows: list[list[str]] = []
     sensitivity_row_classes: list[str | None] = []
     for name, est in scenario_estimates.items():
@@ -408,10 +597,10 @@ with st.container(border=True, key="section_10"):
     )
 
 # ---------------------------------------------------------------------------
-# 11. Explanation
+# 9. Explanation
 # ---------------------------------------------------------------------------
-with st.container(border=True, key="section_11"):
-    theme.section_header(11, "Result explanation")
+with st.container(border=True, key="section_9"):
+    theme.section_header(9, "Result explanation")
     theme.callout("Summary", estimate.explanation)
 
 # ---------------------------------------------------------------------------
@@ -432,17 +621,17 @@ with st.expander("Calculation details"):
     for line in estimate.operations.trace:
         st.text(f"{line.label}: {line.detail}")
     st.subheader("Archive class details")
-    for r in estimate.storage.archive_results:
-        st.markdown(f"**{r.file_type} — {STORAGE_CLASS_LABELS[r.storage_class]}**")
+    for r in estimate.storage.datasets:
+        st.markdown(f"**{r.name} — {STORAGE_CLASS_LABELS[r.archive_class]}**")
         st.text(r.retrieval_characteristics)
         if r.minimum_duration_warning:
             st.warning(r.minimum_duration_warning)
 
 # ---------------------------------------------------------------------------
-# 12. Pricing & assumptions
+# 10. Pricing & assumptions
 # ---------------------------------------------------------------------------
-with st.container(border=True, key="section_12"):
-    theme.section_header(12, "Pricing & assumptions")
+with st.container(border=True, key="section_10"):
+    theme.section_header(10, "Pricing & assumptions")
     st.markdown(
         "AWS storage, request, archive retrieval and data-transfer costs are based on "
         "published AWS pricing for the Africa (Cape Town) region (`af-south-1`). Prices "
@@ -477,20 +666,19 @@ with st.container(border=True, key="section_12"):
     with acol2:
         st.markdown(
             "**CBIO/project planning assumptions**\n"
-            "- FASTQ / CRAM / gVCF GB per sample\n"
-            "- Active & archive storage duration\n"
+            "- Dataset sizes, retrieval %, read passes\n"
+            "- Active & archive storage duration per dataset\n"
             "- Archive class selection\n"
-            "- Workflow read/pass counts, CRAM retrieval %\n"
             "- Transfer contingency\n"
             "- Exchange rate, VAT\n"
             "- Engineering hours & hourly rate"
         )
 
 # ---------------------------------------------------------------------------
-# 13. Export
+# 11. Export
 # ---------------------------------------------------------------------------
-with st.container(border=True, key="section_13"):
-    theme.section_header(13, "Export")
+with st.container(border=True, key="section_11"):
+    theme.section_header(11, "Export")
     excol1, excol2, excol3 = st.columns(3)
     with excol1:
         st.download_button(
