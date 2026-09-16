@@ -17,7 +17,6 @@ import theme
 from views import compute, storage, summary, transfer
 
 st.set_page_config(page_title="CBIO Infrastructure Cost Planner", layout="wide")
-theme.inject()
 theme.header()
 
 pages = [

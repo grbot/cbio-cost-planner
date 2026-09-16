@@ -1,49 +1,51 @@
 <svg viewBox="0 0 200 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true" focusable="false">
-  <!-- CBIO Genomics Infrastructure Cost Planner — graphical mark (spec 010a).
-       DNA double helix + three infrastructure nodes (storage / compute /
-       transfer). Flat shapes and strokes only: no gradients, shadows,
-       filters, or embedded raster data. GRO colours only. -->
+  <!-- CBIO Genomics Infrastructure Cost Planner — graphical mark (spec 010a,
+       refined 010b). DNA double helix + three infrastructure nodes (storage
+       / compute / transfer). Flat shapes and strokes only: no gradients,
+       shadows, filters, or embedded raster data. GRO colours only.
+       010b: fewer/larger twists and wider strand separation so the helix
+       reads clearly as DNA, thinner connectors so they stay subordinate to
+       it, and larger node icons. -->
 
   <!-- DNA double helix: two mirrored strands sharing the same axis crossings -->
-  <path d="M38 8 C58 8 58 53 38 53 C18 53 18 98 38 98 C58 98 58 143 38 143 C18 143 18 188 38 188 C58 188 58 233 38 233"
+  <path d="M38 8 C62 8 62 83 38 83 C14 83 14 157 38 157 C62 157 62 232 38 232"
         fill="none" stroke="#042C5B" stroke-width="9" stroke-linecap="round" />
-  <path d="M38 8 C18 8 18 53 38 53 C58 53 58 98 38 98 C18 98 18 143 38 143 C58 143 58 188 38 188 C18 188 18 233 38 233"
+  <path d="M38 8 C14 8 14 83 38 83 C62 83 62 157 38 157 C14 157 14 232 38 232"
         fill="none" stroke="#0B8BA5" stroke-width="9" stroke-linecap="round" />
 
   <!-- base-pair rungs -->
-  <line x1="23" y1="30" x2="53" y2="30" stroke="#172B3A" stroke-width="3" stroke-linecap="round" />
-  <line x1="23" y1="75" x2="53" y2="75" stroke="#172B3A" stroke-width="3" stroke-linecap="round" />
-  <line x1="23" y1="120" x2="53" y2="120" stroke="#172B3A" stroke-width="3" stroke-linecap="round" />
-  <line x1="23" y1="165" x2="53" y2="165" stroke="#172B3A" stroke-width="3" stroke-linecap="round" />
-  <line x1="23" y1="210" x2="53" y2="210" stroke="#172B3A" stroke-width="3" stroke-linecap="round" />
+  <line x1="20" y1="46" x2="56" y2="46" stroke="#172B3A" stroke-width="3.5" stroke-linecap="round" />
+  <line x1="20" y1="120" x2="56" y2="120" stroke="#172B3A" stroke-width="3.5" stroke-linecap="round" />
+  <line x1="20" y1="195" x2="56" y2="195" stroke="#172B3A" stroke-width="3.5" stroke-linecap="round" />
 
-  <!-- connectors from helix to each infrastructure node -->
-  <line x1="38" y1="44" x2="116" y2="44" stroke="#0B8BA5" stroke-width="6" stroke-linecap="round" />
-  <line x1="38" y1="120" x2="116" y2="120" stroke="#042C5B" stroke-width="6" stroke-linecap="round" />
-  <line x1="38" y1="196" x2="116" y2="196" stroke="#0B8BA5" stroke-width="6" stroke-linecap="round" />
+  <!-- connectors from helix to each infrastructure node: thinner than the
+       helix strands so DNA -> infrastructure reads as the intended hierarchy -->
+  <line x1="38" y1="44" x2="116" y2="44" stroke="#0B8BA5" stroke-width="3" stroke-linecap="round" />
+  <line x1="38" y1="120" x2="116" y2="120" stroke="#042C5B" stroke-width="3" stroke-linecap="round" />
+  <line x1="38" y1="196" x2="116" y2="196" stroke="#0B8BA5" stroke-width="3" stroke-linecap="round" />
 
   <!-- storage node -->
   <circle cx="152" cy="44" r="36" fill="#0B8BA5" />
-  <ellipse cx="152" cy="32" rx="13" ry="4.5" fill="#FFFFFF" />
-  <ellipse cx="152" cy="44" rx="13" ry="4.5" fill="#FFFFFF" />
-  <ellipse cx="152" cy="56" rx="13" ry="4.5" fill="#FFFFFF" />
+  <ellipse cx="152" cy="30" rx="15" ry="5" fill="#FFFFFF" />
+  <ellipse cx="152" cy="44" rx="15" ry="5" fill="#FFFFFF" />
+  <ellipse cx="152" cy="58" rx="15" ry="5" fill="#FFFFFF" />
 
   <!-- compute node -->
   <circle cx="152" cy="120" r="36" fill="#042C5B" />
-  <rect x="141" y="109" width="22" height="22" rx="3" fill="#FFFFFF" />
-  <line x1="146" y1="104" x2="146" y2="109" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" />
-  <line x1="158" y1="104" x2="158" y2="109" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" />
-  <line x1="146" y1="131" x2="146" y2="136" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" />
-  <line x1="158" y1="131" x2="158" y2="136" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" />
-  <line x1="136" y1="114" x2="141" y2="114" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" />
-  <line x1="136" y1="126" x2="141" y2="126" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" />
-  <line x1="163" y1="114" x2="168" y2="114" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" />
-  <line x1="163" y1="126" x2="168" y2="126" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" />
+  <rect x="139" y="107" width="26" height="26" rx="4" fill="#FFFFFF" />
+  <line x1="146" y1="101" x2="146" y2="107" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" />
+  <line x1="158" y1="101" x2="158" y2="107" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" />
+  <line x1="146" y1="133" x2="146" y2="139" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" />
+  <line x1="158" y1="133" x2="158" y2="139" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" />
+  <line x1="133" y1="113" x2="139" y2="113" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" />
+  <line x1="133" y1="127" x2="139" y2="127" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" />
+  <line x1="165" y1="113" x2="171" y2="113" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" />
+  <line x1="165" y1="127" x2="171" y2="127" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" />
 
   <!-- transfer node: bidirectional arrows -->
   <circle cx="152" cy="196" r="36" fill="#0B8BA5" />
-  <line x1="139" y1="189" x2="161" y2="189" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
-  <polyline points="154,183 161,189 154,195" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
-  <line x1="165" y1="203" x2="143" y2="203" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
-  <polyline points="150,197 143,203 150,209" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+  <line x1="136" y1="189" x2="163" y2="189" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="156,183 163,189 156,195" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+  <line x1="168" y1="203" x2="141" y2="203" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="148,197 141,203 148,209" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
 </svg>

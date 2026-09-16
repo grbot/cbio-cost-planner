@@ -95,9 +95,9 @@ a[data-testid="stTopNavLink"][aria-current="page"] {{
    border, shadow or gradient. */
 .gro-header {{
     display: flex;
-    align-items: center;
-    gap: 1.5rem;
-    margin: 0.25rem 0 1.5rem 0;
+    align-items: flex-start;
+    gap: 1.125rem;
+    margin: 0 0 1.25rem 0;
 }}
 .gro-header-mark {{
     flex: 0 0 auto;
@@ -132,14 +132,17 @@ a[data-testid="stTopNavLink"][aria-current="page"] {{
     border-top: 2px solid {TEAL};
     width: 100%;
     max-width: 32rem;
-    margin: 0.5rem 0 0.4rem 0;
+    /* !important: Streamlit's own [data-testid="stMarkdownContainer"] hr
+       rule (margin: 2rem 0) is more specific (attribute+tag) than a plain
+       class selector and otherwise wins the cascade (spec 010b). */
+    margin: 1.125rem 0 1rem 0 !important;
 }}
 .gro-header-strapline {{
     font-family: {FONT_STACK_BODY};
     font-weight: 600;
     color: {TEAL};
-    font-size: 0.8rem;
-    letter-spacing: 0.12em;
+    font-size: 0.9rem;
+    letter-spacing: 0.08em;
 }}
 @media (max-width: 640px) {{
     .gro-header {{
@@ -162,12 +165,17 @@ a[data-testid="stTopNavLink"][aria-current="page"] {{
     }}
 }}
 
-/* Central application surface: sits subtly above the page background */
+/* Central application surface: sits subtly above the page background.
+   padding-top is deliberately larger than the other sides (spec 010b) to
+   clear Streamlit's fixed top-nav header (measured ~60px) with visible
+   margin — this is the single, explicit source of the branding header's
+   top offset (see theme.header(), which emits CSS + header markup in one
+   st.markdown call so no ambient inter-element gap can add to it). */
 [data-testid="stMainBlockContainer"] {{
     background-color: {APP_SURFACE};
     max-width: 1400px;
     border: 1px solid {BORDER};
-    padding: 2rem 2.5rem;
+    padding: 4.75rem 2.5rem 2rem;
 }}
 
 h1, h2, h3, h4, h5,
@@ -572,17 +580,17 @@ div[data-testid="stRadio"][class*="st-key-project_mode"] label div:first-child {
 """
 
 
-def inject() -> None:
-    """Inject the GRO stylesheet. Call once, immediately after set_page_config."""
-    st.markdown(_CSS, unsafe_allow_html=True)
-
-
 def header() -> None:
-    """Render the shared application branding header (spec 010a).
+    """Inject the GRO stylesheet and render the shared branding header
+    (spec 010a/010b) in one call: page config -> theme.header() -> nav.
 
     SVG mark + real HTML text (never text baked into the SVG), used
-    identically on every page. Call once from app.py, above the top
-    navigation.
+    identically on every page. The stylesheet and header markup are
+    emitted in a single st.markdown() call deliberately — two separate
+    calls become two sibling elements, and Streamlit's own inter-element
+    flex gap then adds an uncontrolled offset on top of
+    stMainBlockContainer's padding-top, which previously pushed the header
+    behind Streamlit's fixed top nav (spec 010b overlap bug).
     """
     # A blank line inside an st.markdown(unsafe_allow_html=True) block ends
     # the raw-HTML block per CommonMark, corrupting the SVG parse — strip
@@ -590,7 +598,8 @@ def header() -> None:
     # readability).
     mark_svg = "\n".join(line for line in _MARK_SVG_PATH.read_text().splitlines() if line.strip())
     st.markdown(
-        f'<div class="gro-header">'
+        _CSS
+        + f'<div class="gro-header">'
         f'<div class="gro-header-mark">{mark_svg}</div>'
         f'<div class="gro-header-text">'
         f'<div class="gro-header-cbio">CBIO</div>'
