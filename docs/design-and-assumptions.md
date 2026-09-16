@@ -42,11 +42,13 @@ stages. The long-term intent is for all modules to operate over one shared
 project/dataset model so the planner produces one coherent project
 infrastructure estimate.
 
-**Status: Storage is Implemented. Compute, Transfer and Project Summary
-(as a cross-module rollup beyond today's cost-summary panel) are
-Planned.** Everything under [§10](#10-compute-planned) onward in this
-document describes planned design direction, not current behaviour,
-unless explicitly marked otherwise.
+**Status: Storage is Implemented. The Storage / Compute / Transfer /
+Project Summary application navigation and module shell are Implemented
+(`app.py`, `views/`) — Compute and Transfer calculations themselves, and a
+full cross-module Project Summary rollup, remain Planned.** Everything
+under [§10](#10-compute-planned) onward in this document describes
+planned design direction, not current behaviour, unless explicitly marked
+otherwise.
 
 ---
 
@@ -86,11 +88,18 @@ provenance:
 
 Both project modes reduce to one internal representation before reaching
 a single calculation engine (`cbio_cost/calculator.py`,
-`cbio_cost/storage.py`, `cbio_cost/transfer.py`): a `Project` (name, mode,
-retention, transfer contingency, headroom) plus a `list[Dataset]`, each
-with `size_gb`, `retrieval_fraction`, `read_passes`, `active_months` and
-`archive_class`. WGS 30x is conceptually a predefined *template* over this
-model, not a separate calculation engine — see `cbio_cost/models.py`.
+`cbio_cost/storage.py`, `cbio_cost/transfer.py`): a `ProjectInputs` (name,
+mode, retention, transfer contingency, headroom) plus a `list[Dataset]`,
+each with `size_gb`, `retrieval_fraction`, `read_passes`, `active_months`
+and `archive_class`. WGS 30x is conceptually a predefined *template* over
+this model, not a separate calculation engine — see `cbio_cost/models.py`.
+
+A thin cross-module wrapper, `cbio_cost/project.py` (`Project`,
+`ProjectMetadata`), holds this project identity plus the Storage module's
+computed `CostEstimate`, shared via session state so other modules (today,
+Project Summary) can read it without redefining or recomputing it. It
+performs no calculation of its own — see [§4 of spec
+010](../requests/010-application-architecture.md).
 
 ### WGS 30x template
 
@@ -374,12 +383,24 @@ assumptions) are collected.
 
 ## 9. Project Summary (status)
 
-There is no separate "Project Summary" module today; the current Cost
-Summary panel (dataset totals, cost breakdown, sensitivity table,
-plain-English explanation, calculation-detail trace) serves this role for
-the currently-implemented Storage domain. **A cross-module Project
-Summary that rolls up Storage + Compute + Transfer is Planned**, pending
-the Compute and Transfer modules below.
+**Status: PARTIALLY AVAILABLE.** A dedicated Project Summary page
+(`views/summary.py`) now exists in the navigation. It renders only from
+the shared `Project`/`CostEstimate` populated by the Storage module in
+this session — project type, sample count, retention, durable data
+volume, per-dataset storage lifecycle (archive class), storage-related
+cost, engineering cost, and the relevant headroom/contingency/currency
+assumptions — and never fabricates a Compute or Transfer figure. Because
+Streamlit only reruns the page currently being viewed, these figures
+reflect Storage's last-computed values in the session rather than
+recalculating live; the page says so explicitly. Before Storage has been
+visited in a session, it shows a plain "visit Storage" notice instead of
+inventing data.
+
+The detailed Cost Summary panel (dataset totals, cost breakdown,
+sensitivity table, plain-English explanation, calculation-detail trace)
+remains on the Storage page itself. **A full cross-module rollup that also
+incorporates Compute and Transfer results is Planned**, pending those
+modules below.
 
 ---
 

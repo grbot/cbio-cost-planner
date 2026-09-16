@@ -53,6 +53,36 @@ input, textarea, select {{
 [data-testid="stHeader"] {{
     background-color: {PAGE_BG};
     border-bottom: 1px solid {BORDER};
+    box-shadow: none;
+}}
+
+/* Top-level Storage / Compute / Transfer / Project Summary navigation
+   (spec 010 §11). st.navigation(position="top") renders each page as a
+   real <a data-testid="stTopNavLink"> link (genuine URL-based navigation,
+   confirmed against the rendered app), with the current page marked via
+   the standard aria-current="page" attribute. */
+[data-testid="stTopNavLinkContainer"] {{
+    background: none;
+    box-shadow: none;
+}}
+a[data-testid="stTopNavLink"] {{
+    font-family: {FONT_STACK_HEADING};
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: {MUTED};
+    text-decoration: none;
+    padding: 0.6rem 0.9rem;
+    border-bottom: 3px solid transparent;
+    border-radius: 0;
+    box-shadow: none;
+    background: none;
+}}
+a[data-testid="stTopNavLink"]:hover {{
+    color: {NAVY};
+}}
+a[data-testid="stTopNavLink"][aria-current="page"] {{
+    color: {NAVY};
+    border-bottom-color: {TEAL};
 }}
 
 /* Central application surface: sits subtly above the page background */

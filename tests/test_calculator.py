@@ -356,13 +356,14 @@ def test_config_loaders_are_not_cache_resource():
     on cbio_cost/config.py or the YAML it reads. That let a lightweight
     Streamlit Cloud redeploy (code sync + rerun, no full process restart)
     keep serving a PricingConfig built before pricing_source/region_name/
-    pricing_last_verified existed. app.py's config loaders must stay
-    uncached so every rerun reflects the current config on disk.
+    pricing_last_verified existed. views/storage.py's config loaders (moved
+    from app.py by spec 010) must stay uncached so every rerun reflects the
+    current config on disk.
     """
-    app_source = (CONFIG_DIR.parent / "app.py").read_text()
+    storage_source = (CONFIG_DIR.parent / "views" / "storage.py").read_text()
     for func_name in ("_load_pricing", "_load_profile_and_scenarios"):
-        def_index = app_source.index(f"def {func_name}(")
-        preceding_lines = app_source[:def_index].strip().splitlines()
+        def_index = storage_source.index(f"def {func_name}(")
+        preceding_lines = storage_source[:def_index].strip().splitlines()
         assert "cache_resource" not in preceding_lines[-1], (
             f"{func_name} must not be decorated with st.cache_resource"
         )

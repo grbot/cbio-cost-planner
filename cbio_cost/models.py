@@ -34,6 +34,12 @@ class Dataset:
 
     Both WGS 30x (generated from the per-sample-volume template) and Custom
     Project (entered directly by the user) produce a list of these.
+
+    Represents **durable** storage only (spec 010 §6) — e.g. FASTQ, CRAM,
+    gVCF, released VCF, QC outputs. Temporary/working compute storage (sort
+    temp files, workflow work directories, container/cache space, ...)
+    belongs to a future, separate Compute-domain model and is deliberately
+    not a field on this class.
     """
 
     name: str
