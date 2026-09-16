@@ -10,7 +10,12 @@ by ``cbio_cost`` (the framework-independent calculation engine).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import streamlit as st
+
+_BRANDING_DIR = Path(__file__).resolve().parent / "assets" / "branding"
+_MARK_SVG_PATH = _BRANDING_DIR / "cbio-infrastructure-mark.svg"
 
 NAVY = "#042C5B"
 TEAL = "#0B8BA5"
@@ -83,6 +88,78 @@ a[data-testid="stTopNavLink"]:hover {{
 a[data-testid="stTopNavLink"][aria-current="page"] {{
     color: {NAVY};
     border-bottom-color: {TEAL};
+}}
+
+/* Application branding header (spec 010a) — SVG mark + real-text identity,
+   sits directly on the page background above the top navigation. No card,
+   border, shadow or gradient. */
+.gro-header {{
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    margin: 0.25rem 0 1.5rem 0;
+}}
+.gro-header-mark {{
+    flex: 0 0 auto;
+    line-height: 0;
+}}
+.gro-header-mark svg {{
+    display: block;
+    width: auto;
+    height: 7rem;
+}}
+.gro-header-text {{
+    flex: 1 1 auto;
+    min-width: 0;
+}}
+.gro-header-cbio {{
+    font-family: {FONT_STACK_HEADING};
+    font-weight: 700;
+    color: {NAVY};
+    font-size: 2.6rem;
+    line-height: 1.05;
+}}
+.gro-header-title {{
+    font-family: {FONT_STACK_HEADING};
+    font-weight: 500;
+    color: {NAVY};
+    font-size: 1.5rem;
+    line-height: 1.2;
+    white-space: nowrap;
+}}
+.gro-header-rule {{
+    border: none;
+    border-top: 2px solid {TEAL};
+    width: 100%;
+    max-width: 32rem;
+    margin: 0.5rem 0 0.4rem 0;
+}}
+.gro-header-strapline {{
+    font-family: {FONT_STACK_BODY};
+    font-weight: 600;
+    color: {TEAL};
+    font-size: 0.8rem;
+    letter-spacing: 0.12em;
+}}
+@media (max-width: 640px) {{
+    .gro-header {{
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }}
+    .gro-header-mark svg {{
+        height: 4.5rem;
+    }}
+    .gro-header-cbio {{
+        font-size: 2rem;
+    }}
+    .gro-header-title {{
+        font-size: 1.15rem;
+        white-space: normal;
+    }}
+    .gro-header-rule {{
+        max-width: 100%;
+    }}
 }}
 
 /* Central application surface: sits subtly above the page background */
@@ -498,6 +575,32 @@ div[data-testid="stRadio"][class*="st-key-project_mode"] label div:first-child {
 def inject() -> None:
     """Inject the GRO stylesheet. Call once, immediately after set_page_config."""
     st.markdown(_CSS, unsafe_allow_html=True)
+
+
+def header() -> None:
+    """Render the shared application branding header (spec 010a).
+
+    SVG mark + real HTML text (never text baked into the SVG), used
+    identically on every page. Call once from app.py, above the top
+    navigation.
+    """
+    # A blank line inside an st.markdown(unsafe_allow_html=True) block ends
+    # the raw-HTML block per CommonMark, corrupting the SVG parse — strip
+    # blank lines from the injected copy (the source file keeps them for
+    # readability).
+    mark_svg = "\n".join(line for line in _MARK_SVG_PATH.read_text().splitlines() if line.strip())
+    st.markdown(
+        f'<div class="gro-header">'
+        f'<div class="gro-header-mark">{mark_svg}</div>'
+        f'<div class="gro-header-text">'
+        f'<div class="gro-header-cbio">CBIO</div>'
+        f'<div class="gro-header-title">Genomics Infrastructure Cost Planner</div>'
+        f'<hr class="gro-header-rule" />'
+        f'<div class="gro-header-strapline">STORAGE&nbsp;|&nbsp;COMPUTE&nbsp;|&nbsp;TRANSFER</div>'
+        f'</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def section_header(number: int, title: str) -> None:

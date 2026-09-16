@@ -20,4 +20,6 @@ def test_app_starts_and_renders_default_storage_page():
     at = AppTest.from_file(str(APP_PATH), default_timeout=30)
     at.run()
     assert not at.exception
-    assert at.title[0].value == "CBIO Genomics Infrastructure Cost Planner"
+    # The branding header (spec 010a) is raw HTML via theme.header(), not a
+    # real st.title element, so look for it in the rendered markdown instead.
+    assert any("CBIO" in md.value for md in at.markdown)

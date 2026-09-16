@@ -147,6 +147,10 @@ def render() -> None:
         st.session_state.update(_default_state())
         st.session_state["loaded"] = True
 
+    st.caption(
+        "Early-stage planning and grant-budgeting tool for CBIO genomics projects. "
+        "This is a planning estimate, not an AWS billing system."
+    )
     st.button("Load 500 x 30x WGS / 5-year demo profile", key="load_demo_button", on_click=_load_demo_profile)
 
     pricing = _load_pricing()

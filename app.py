@@ -18,13 +18,7 @@ from views import compute, storage, summary, transfer
 
 st.set_page_config(page_title="CBIO Infrastructure Cost Planner", layout="wide")
 theme.inject()
-
-st.title("CBIO Genomics Infrastructure Cost Planner")
-st.caption("STORAGE | COMPUTE | TRANSFER")
-st.caption(
-    "Early-stage planning and grant-budgeting tool for CBIO genomics projects. "
-    "This is a planning estimate, not an AWS billing system."
-)
+theme.header()
 
 pages = [
     st.Page(storage.render, title="Storage", url_path="storage", default=True),
