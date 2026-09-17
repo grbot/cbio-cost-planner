@@ -10,12 +10,7 @@ by ``cbio_cost`` (the framework-independent calculation engine).
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import streamlit as st
-
-_BRANDING_DIR = Path(__file__).resolve().parent / "assets" / "branding"
-_MARK_SVG_PATH = _BRANDING_DIR / "cbio-infrastructure-mark.svg"
 
 NAVY = "#042C5B"
 TEAL = "#0B8BA5"
@@ -90,78 +85,32 @@ a[data-testid="stTopNavLink"][aria-current="page"] {{
     border-bottom-color: {TEAL};
 }}
 
-/* Application branding header (spec 010a) — SVG mark + real-text identity,
-   sits directly on the page background above the top navigation. No card,
+/* Application branding header (spec 010c) — typography-only identity, sits
+   directly on the page background above the top navigation. No logo, card,
    border, shadow or gradient. */
 .gro-header {{
-    display: flex;
-    align-items: flex-start;
-    gap: 1.125rem;
-    margin: 0 0 1.25rem 0;
-}}
-.gro-header-mark {{
-    flex: 0 0 auto;
-    line-height: 0;
-}}
-.gro-header-mark svg {{
-    display: block;
-    width: auto;
-    height: 7rem;
-}}
-.gro-header-text {{
-    flex: 1 1 auto;
-    min-width: 0;
+    margin: 0 0 0.75rem 0;
 }}
 .gro-header-cbio {{
     font-family: {FONT_STACK_HEADING};
     font-weight: 700;
     color: {NAVY};
-    font-size: 2.6rem;
+    font-size: 2.75rem;
     line-height: 1.05;
 }}
 .gro-header-title {{
     font-family: {FONT_STACK_HEADING};
     font-weight: 500;
-    color: {NAVY};
-    font-size: 1.5rem;
+    color: {SLATE};
+    font-size: 1.65rem;
     line-height: 1.2;
-    white-space: nowrap;
-}}
-.gro-header-rule {{
-    border: none;
-    border-top: 2px solid {TEAL};
-    width: 100%;
-    max-width: 32rem;
-    /* !important: Streamlit's own [data-testid="stMarkdownContainer"] hr
-       rule (margin: 2rem 0) is more specific (attribute+tag) than a plain
-       class selector and otherwise wins the cascade (spec 010b). */
-    margin: 1.125rem 0 1rem 0 !important;
-}}
-.gro-header-strapline {{
-    font-family: {FONT_STACK_BODY};
-    font-weight: 600;
-    color: {TEAL};
-    font-size: 0.9rem;
-    letter-spacing: 0.08em;
 }}
 @media (max-width: 640px) {{
-    .gro-header {{
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 0.75rem;
-    }}
-    .gro-header-mark svg {{
-        height: 4.5rem;
-    }}
     .gro-header-cbio {{
-        font-size: 2rem;
+        font-size: 2.1rem;
     }}
     .gro-header-title {{
-        font-size: 1.15rem;
-        white-space: normal;
-    }}
-    .gro-header-rule {{
-        max-width: 100%;
+        font-size: 1.35rem;
     }}
 }}
 
@@ -581,33 +530,22 @@ div[data-testid="stRadio"][class*="st-key-project_mode"] label div:first-child {
 
 
 def header() -> None:
-    """Inject the GRO stylesheet and render the shared branding header
-    (spec 010a/010b) in one call: page config -> theme.header() -> nav.
+    """Inject the GRO stylesheet and render the shared typography-first
+    branding header (spec 010c) in one call: page config -> theme.header()
+    -> nav.
 
-    SVG mark + real HTML text (never text baked into the SVG), used
-    identically on every page. The stylesheet and header markup are
-    emitted in a single st.markdown() call deliberately — two separate
-    calls become two sibling elements, and Streamlit's own inter-element
-    flex gap then adds an uncontrolled offset on top of
-    stMainBlockContainer's padding-top, which previously pushed the header
-    behind Streamlit's fixed top nav (spec 010b overlap bug).
+    The stylesheet and header markup are emitted in a single st.markdown()
+    call deliberately — two separate calls become two sibling elements, and
+    Streamlit's own inter-element flex gap then adds an uncontrolled offset
+    on top of stMainBlockContainer's padding-top, which previously pushed
+    the header behind Streamlit's fixed top nav (spec 010b overlap bug).
     """
-    # A blank line inside an st.markdown(unsafe_allow_html=True) block ends
-    # the raw-HTML block per CommonMark, corrupting the SVG parse — strip
-    # blank lines from the injected copy (the source file keeps them for
-    # readability).
-    mark_svg = "\n".join(line for line in _MARK_SVG_PATH.read_text().splitlines() if line.strip())
     st.markdown(
         _CSS
-        + f'<div class="gro-header">'
-        f'<div class="gro-header-mark">{mark_svg}</div>'
-        f'<div class="gro-header-text">'
-        f'<div class="gro-header-cbio">CBIO</div>'
-        f'<div class="gro-header-title">Genomics Infrastructure Cost Planner</div>'
-        f'<hr class="gro-header-rule" />'
-        f'<div class="gro-header-strapline">STORAGE&nbsp;|&nbsp;COMPUTE&nbsp;|&nbsp;TRANSFER</div>'
-        f'</div>'
-        f'</div>',
+        + '<div class="gro-header">'
+        '<div class="gro-header-cbio">CBIO</div>'
+        '<div class="gro-header-title">Genomics Infrastructure Cost Planner</div>'
+        '</div>',
         unsafe_allow_html=True,
     )
 
