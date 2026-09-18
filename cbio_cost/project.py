@@ -14,9 +14,10 @@ are not modelled yet — they are reserved extension points for later specs.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
+from cbio_cost.compute_models import ComputeConfig, ComputeResult
 from cbio_cost.models import CostEstimate, Dataset, ProjectInputs
 
 PROJECT_SESSION_KEY = "project"
@@ -45,6 +46,8 @@ class Project:
     metadata: ProjectMetadata
     datasets: list[Dataset] = field(default_factory=list)
     storage_estimate: CostEstimate | None = None
+    compute_config: ComputeConfig | None = None
+    compute_result: ComputeResult | None = None
 
     @classmethod
     def from_storage(
@@ -65,3 +68,8 @@ class Project:
             datasets=datasets,
             storage_estimate=estimate,
         )
+
+    def with_compute(self, config: ComputeConfig, result: ComputeResult) -> "Project":
+        """Attach a completed Compute calculation (spec 011) without
+        recomputing Storage."""
+        return replace(self, compute_config=config, compute_result=result)

@@ -72,11 +72,32 @@ def render() -> None:
             "session. Revisit the Storage page after changing any input to refresh them."
         )
 
-        theme.callout(
-            "Compute",
-            "Compute results will be added in a later development stage. No compute cost "
-            "or resource figures are shown here.",
-        )
+        if project.compute_result is not None:
+            compute = project.compute_result
+            st.markdown("**Compute**")
+            st.markdown(
+                "Workflow: FASTQ -> BWA-MEM2 -> CRAM -> DeepVariant -> gVCF -> GLnexus (excluded)"
+            )
+            ccol1, ccol2, ccol3 = st.columns(3)
+            ccol1.metric("Known modelled runtime", f"{compute.known_modelled_elapsed_hours:,.1f} h")
+            ccol2.metric(
+                "Concurrency (align/DV)",
+                f"{compute.alignment.concurrency} / {compute.deepvariant.concurrency}",
+            )
+            ccol3.metric(
+                "Peak working storage", f"{compute.working_storage.peak_simultaneous_gib:,.0f} GiB"
+            )
+            st.caption(
+                "Evidence status: Measured (alignment) + Published benchmark (DeepVariant) + "
+                "Planning assumptions (RAM, scratch) — GLnexus excluded, no approved benchmark."
+            )
+            theme.callout("Compute cost — not yet calculated", "AWS compute pricing is pending verified regional pricing (see Compute page).")
+        else:
+            theme.callout(
+                "Compute",
+                "Visit the Compute page to configure and calculate Compute figures for this "
+                "project. No compute cost or resource figures are shown here yet.",
+            )
         theme.callout(
             "Transfer",
             "Transfer results will be added in a later development stage. No transfer "

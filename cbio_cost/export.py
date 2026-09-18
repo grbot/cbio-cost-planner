@@ -8,6 +8,7 @@ import json
 from decimal import Decimal
 from typing import Any
 
+from cbio_cost.compute_models import ComputeResult
 from cbio_cost.models import CostEstimate, PricingConfig
 from cbio_cost.units import gb_to_tb
 
@@ -186,4 +187,187 @@ def to_markdown(estimate: CostEstimate, pricing: PricingConfig) -> str:
         "data in AWS or other cloud/object storage. Project-specific consent, ethics, data-access "
         "and institutional requirements must be reviewed separately."
     )
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Compute exports (spec 011 §33) — additive; Storage's to_csv/to_json/
+# to_markdown above are untouched. GLnexus/AWS pricing/Sentieon export as
+# ``None``/"not modelled"/"excluded", never as ``0``.
+# ---------------------------------------------------------------------------
+
+
+def _stage_row(stage) -> dict[str, Any]:
+    return {
+        "name": stage.name,
+        "workflow_stage": stage.workflow_stage,
+        "scope": stage.scope,
+        "status": stage.status,
+        "cpu": stage.cpu,
+        "memory_gib": str(stage.memory_gib) if stage.memory_gib is not None else None,
+        "runtime_hours": str(stage.runtime_hours) if stage.runtime_hours is not None else None,
+        "included_in_total": stage.included_in_total,
+        "evidence": {
+            key: {
+                "classification": ev.classification,
+                "label": ev.label,
+                "source": ev.source,
+                "date": ev.date,
+                "value": ev.value,
+                "notes": ev.notes,
+            }
+            for key, ev in stage.evidence.items()
+        },
+    }
+
+
+def _concurrency_row(result) -> dict[str, Any]:
+    return {
+        "samples": result.samples,
+        "concurrency": result.concurrency,
+        "runtime_per_unit_hours": str(result.runtime_per_unit_hours),
+        "runtime_basis": result.runtime_basis,
+        "waves": result.waves,
+        "worker_hours": str(result.worker_hours),
+        "idealised_elapsed_hours": str(result.idealised_elapsed_hours),
+        "runtime_evidence_classification": result.runtime_evidence.classification,
+    }
+
+
+def compute_to_json(project_name: str, num_samples: int, result: ComputeResult) -> str:
+    """Render the Compute planning result as JSON text (spec 011 §33)."""
+    payload = {
+        "project": {"project_name": project_name, "num_samples": num_samples},
+        "workflow": "FASTQ -> BWA-MEM2 -> CRAM -> DeepVariant -> gVCF -> GLnexus -> cohort VCF",
+        "stages": [_stage_row(s) for s in result.stages],
+        "alignment": _concurrency_row(result.alignment),
+        "deepvariant": _concurrency_row(result.deepvariant),
+        "glnexus": {
+            "status": result.glnexus.status,
+            "runtime_hours": None,
+            "included_in_total": False,
+            "note": "not modelled — no approved planning benchmark",
+        },
+        "known_modelled_elapsed_hours": str(result.known_modelled_elapsed_hours),
+        "excluded_stages": result.excluded_stages,
+        "working_storage": {
+            "scratch_per_worker_gib": str(result.working_storage.scratch_per_worker_gib),
+            "concurrent_workers": result.working_storage.concurrent_workers,
+            "peak_simultaneous_gib": str(result.working_storage.peak_simultaneous_gib),
+        },
+        "aws": {
+            "region_code": result.aws.region_code,
+            "region_name": result.aws.region_name,
+            "architecture_steps": result.aws.architecture_steps,
+            "batch_orchestration_fee_usd": str(result.aws.batch_orchestration_fee_usd),
+            "purchase_model": result.aws.purchase_model,
+            "pricing_status": result.aws.pricing_status,
+            "compute_cost": "not modelled",
+        },
+        "sentieon": {
+            "usd_per_genome": str(result.sentieon.usd_per_genome),
+            "total_usd": str(result.sentieon.total_usd),
+            "total_zar": str(result.sentieon.total_zar),
+            "status": result.sentieon.status,
+            "included_in_total": False,
+        },
+        "limitations": result.limitations,
+    }
+    return json.dumps(payload, indent=2, default=_json_default)
+
+
+def compute_to_csv(project_name: str, num_samples: int, result: ComputeResult) -> str:
+    """Render the Compute stage/runtime breakdown as CSV text (spec 011 §33)."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["Project", project_name])
+    writer.writerow(["Samples", num_samples])
+    writer.writerow([])
+    writer.writerow(["Stage", "Scope", "CPU", "Memory (GiB)", "Runtime (h)", "Status", "Included in total"])
+    for s in result.stages:
+        writer.writerow(
+            [
+                s.name,
+                s.scope,
+                s.cpu if s.cpu is not None else "not modelled",
+                s.memory_gib if s.memory_gib is not None else "not modelled",
+                s.runtime_hours if s.runtime_hours is not None else "not modelled",
+                s.status,
+                s.included_in_total,
+            ]
+        )
+    writer.writerow([])
+    writer.writerow(["Known modelled elapsed time (h)", str(result.known_modelled_elapsed_hours)])
+    writer.writerow(["Excluded stages", "; ".join(result.excluded_stages)])
+    writer.writerow([])
+    writer.writerow(["Working storage: scratch/worker (GiB)", str(result.working_storage.scratch_per_worker_gib)])
+    writer.writerow(["Working storage: concurrent workers", str(result.working_storage.concurrent_workers)])
+    writer.writerow(["Working storage: peak simultaneous (GiB)", str(result.working_storage.peak_simultaneous_gib)])
+    writer.writerow([])
+    writer.writerow(["AWS region", f"{result.aws.region_name} ({result.aws.region_code})"])
+    writer.writerow(["AWS compute price", result.aws.pricing_status])
+    writer.writerow([])
+    writer.writerow(["Sentieon (US$/genome)", str(result.sentieon.usd_per_genome)])
+    writer.writerow(["Sentieon status", result.sentieon.status])
+    return buffer.getvalue()
+
+
+def compute_to_markdown(project_name: str, num_samples: int, result: ComputeResult) -> str:
+    """Render a concise Markdown Compute planning summary (spec 011 §33)."""
+    lines = [
+        f"# {project_name} — Compute Planning",
+        "",
+        f"- Samples: {num_samples}",
+        "- Workflow: FASTQ -> BWA-MEM2 -> CRAM -> DeepVariant -> gVCF -> GLnexus -> cohort VCF",
+        "",
+        "## Workflow stages",
+        "",
+        "| Stage | Scope | Resources | Runtime | Status |",
+        "|---|---|---|---:|---|",
+    ]
+    for s in result.stages:
+        resources = ", ".join(
+            part
+            for part in [
+                f"{s.cpu} CPU" if s.cpu is not None else None,
+                f"{s.memory_gib} GiB" if s.memory_gib is not None else None,
+            ]
+            if part
+        ) or "not modelled"
+        runtime = f"{s.runtime_hours:.3f} h" if s.runtime_hours is not None else "not modelled"
+        lines.append(f"| {s.name} | {s.scope} | {resources} | {runtime} | {s.status} |")
+    lines.extend(
+        [
+            "",
+            f"**Known modelled elapsed time:** {result.known_modelled_elapsed_hours:.2f} h "
+            f"(excludes {', '.join(result.excluded_stages)})",
+            "",
+            "## Working storage",
+            "",
+            f"- Scratch/worker: {result.working_storage.scratch_per_worker_gib} GiB",
+            f"- Concurrent workers: {result.working_storage.concurrent_workers}",
+            f"- Peak simultaneous scratch: {result.working_storage.peak_simultaneous_gib} GiB",
+            "- Working storage is temporary compute capacity and is not included in the durable "
+            "Storage estimate.",
+            "",
+            "## AWS execution architecture",
+            "",
+            f"- Region: {result.aws.region_name} (`{result.aws.region_code}`)",
+            f"- Architecture: {' -> '.join(result.aws.architecture_steps)}",
+            f"- AWS Batch orchestration fee: ${result.aws.batch_orchestration_fee_usd}",
+            f"- Purchase model: {result.aws.purchase_model}",
+            f"- Compute cost: {result.aws.pricing_status}",
+            "",
+            "## Sentieon (excluded from current workflow)",
+            "",
+            f"- US${result.sentieon.usd_per_genome}/genome x {num_samples} samples = "
+            f"US${result.sentieon.total_usd:,.2f} (R{result.sentieon.total_zar:,.2f})",
+            f"- Status: {result.sentieon.status}",
+            "",
+            "## Limitations",
+            "",
+        ]
+    )
+    lines.extend(f"- {item}" for item in result.limitations)
+    lines.append("")
     return "\n".join(lines) + "\n"

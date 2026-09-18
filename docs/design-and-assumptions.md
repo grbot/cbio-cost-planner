@@ -398,31 +398,43 @@ inventing data.
 
 The detailed Cost Summary panel (dataset totals, cost breakdown,
 sensitivity table, plain-English explanation, calculation-detail trace)
-remains on the Storage page itself. **A full cross-module rollup that also
-incorporates Compute and Transfer results is Planned**, pending those
-modules below.
+remains on the Storage page itself. Since spec 011, Project Summary also
+shows a Compute section (workflow, known modelled runtime, concurrency,
+working storage, evidence status) once the Compute page has been visited in
+the session — Compute cost itself is shown as **"not yet calculated"**,
+never `$0`, because AWS compute pricing remains unverified (§10.8). **A full
+cross-module rollup that also incorporates Transfer results is Planned**,
+pending that module below.
 
 ---
 
-## 10. Compute (Planned)
+## 10. Compute (Partially implemented)
 
-**Nothing in this section is implemented.** Compute is conceptually
-separated from durable Storage costing and should eventually model:
-processing stages, CPU, RAM, runtime, temporary/working storage,
-concurrency, wall-clock completion time, infrastructure cost,
-software/licensing cost, and execution architecture.
+**Spec 011 implements a first functional Compute module**, scoped to the WGS
+30x project profile and the open-source reference workflow below: workflow
+stages, CPU/RAM (as measured + planning-allocation pairs), runtime,
+concurrency, idealised elapsed time, temporary/working storage, an initial
+AWS execution-architecture recommendation, and Evidence-classified
+provenance on every significant figure (`cbio_cost/evidence.py`,
+`cbio_cost/compute_models.py`, `cbio_cost/compute.py`,
+`cbio_cost/compute_benchmarks.py`). AWS compute pricing, GLnexus, Sentieon
+runtime, ICA/DRAGEN, Custom Project compute support, and Cost-efficient /
+Balanced / Fast scenarios remain **Planned** or **Under investigation** — see
+each subsection below.
 
-It should support scenarios such as **Cost-efficient**, **Balanced** and
-**Fast** — without assuming a faster scenario necessarily costs
-proportionally more or less; such differences should be calculated from
-actual infrastructure use once implemented. Parallelism can alter
+It should eventually support scenarios such as **Cost-efficient**,
+**Balanced** and **Fast** — without assuming a faster scenario necessarily
+costs proportionally more or less; such differences should be calculated
+from actual infrastructure use once implemented. Parallelism can alter
 wall-clock duration, simultaneous scratch requirements, instance
 selection, utilisation, Spot/on-demand exposure, storage lifetime and
 price/performance.
 
-### 10.1 Open-source 30x WGS reference workflow (Planned)
+### 10.1 Open-source 30x WGS reference workflow (Implemented)
 
-Current design direction for the default open-source reference workflow:
+Implemented as the Compute page's workflow (`views/compute.py`), scoped to
+the WGS 30x project profile only — Custom Project compute modelling remains
+**Planned**. Reference workflow:
 
     FASTQ
       ↓
@@ -452,51 +464,72 @@ rather than one undifferentiated "compute hours per genome" number:
   and runtime should eventually be benchmarked for representative cohort
   sizes.
 
-### 10.2 BWA-MEM2 benchmark — Under investigation
+### 10.2 BWA-MEM2 + CRAM index benchmark — Measured (Implemented)
 
-**Status: Under investigation — CBIO/Ilifu benchmark planned.** No
-BWA-MEM2 runtime has been measured or invented for this document. A
-recent workflow used by Scott provides the reference form of the planned
-test:
+**Status: Implemented.** Measured on CBIO/Ilifu, 2026-09-17
+(`cbio_cost/compute_benchmarks.py`). This is **one measured single-sample
+execution**, not universal BWA-MEM2 performance — the planner always labels
+it as such (spec 011 §4).
 
-```text
-bwa-mem2 mem -t 20 \
-  -R '@RG\tID:AGS0834\tSM:AGS0834\tPL:AGS0834' \
-  t2t/chm13v2.0.fa \
-  AGS0834_1.fq.gz AGS0834_2.fq.gz \
+Sample: NA12878. Input: R1 FASTQ ≈48 GB, R2 FASTQ ≈49 GB, total compressed
+FASTQ ≈97 GB. Reference: `Homo_sapiens_assembly38.fasta` (GATK hg38). CPU:
+Intel Xeon Gold 6142 @ 2.60 GHz, 2 sockets × 16 physical cores = 32 physical
+cores, 1 hardware thread/core.
+
+```bash
+bwa-mem2 mem -t 32 ... \
 | samtools sort \
-  --reference t2t/chm13v2.0.fa \
-  --threads 20 \
-  -o AGS0834.cram -
-
-samtools index -@10 AGS0834.cram
+  --reference Homo_sapiens_assembly38.fasta \
+  --threads 32 \
+  -o NA12878.cram
 ```
 
-The benchmark should ideally capture: FASTQ R1/R2 sizes, approximate
-sequencing depth, reference, CPU model, allocated CPU count, allocated
-RAM, wall-clock time, peak RAM, source filesystem/storage,
-temporary/working storage, peak temporary disk usage (if practical),
-resulting CRAM size, and indexing time (if measured separately). Where
-practical, `/usr/bin/time -v` can capture process resource information.
-Purpose: establish a local observed reference point comparable later with
-an AWS execution environment.
+Measured GNU time statistics: elapsed wall time 4:56:42; user CPU time
+239688.20s; system CPU time 5558.03s; average CPU utilisation 1377%;
+maximum resident set size 122,379,120 KB; swaps 0; exit status 0.
 
-### 10.3 DeepVariant benchmark — Published benchmark
+Derived values (computed from the figures above, not re-hardcoded — see
+`BWA_WALL_TIME_HOURS`/`BWA_CPU_CORE_HOURS`/`BWA_PEAK_RAM_GIB` in
+`cbio_cost/compute_benchmarks.py`): wall time = 17802s / 3600 = **4.945
+h/sample**; CPU consumption = (239688.20 + 5558.03)s / 3600 ≈ **68.1
+core-hours/sample** (effective average ≈13.77 cores — *not*
+`32 × wall time`, see spec 011 §11); peak RAM = 122,379,120 KB / (1024×1024)
+≈ **116.7 GiB**.
+
+Output: CRAM ≈57 GB, CRAI ≈2.5 MB.
+
+**Alignment planning profile** (Compute page "Workflow stages"): requested
+CPU = 32 (**Measured** — the benchmark's own execution configuration);
+requested RAM = **160 GiB**, classified **Planning assumption** — derived
+from the measured peak of 116.7 GiB plus operational headroom, and always
+shown alongside the measured figure, never merged into it (spec 011 §6).
+
+**CRAM indexing** (`samtools index -@32 NA12878.cram`, measured): wall time
+15:08.66; user 170.09s; system 60.18s; average CPU utilisation 25%; max RSS
+28,928 KB. Treated as a lightweight downstream operation — not modelled as
+requiring a dedicated 32-core worker, and excluded from the Compute page's
+"known modelled elapsed time" total alongside other workflow overhead (spec
+011 §5, §18).
+
+### 10.3 DeepVariant benchmark — Published benchmark (Implemented)
 
 DeepVariant v1.10 documentation reports a 30x WGS CPU benchmark on a
-96-vCPU / 384-GiB reference machine of approximately:
+96-vCPU / 384-GiB reference machine (GCP `n2-standard-96`, CPU-only, WGS
+sample HG003, mean of 5 runs) of approximately:
 
 - make_examples: 46m 15s
 - call_variants: 15m 58s
 - postprocess: 6m 45s
-- **total: approximately 1h 8m 58s**
+- **total: approximately 1h 8m 58s** (4138s / 3600 ≈1.1494 h/sample)
 
 Source: https://github.com/google/deepvariant/blob/r1.10/docs/metrics.md
 (version: DeepVariant r1.10). DeepVariant's own documentation notes this
 configuration is intended for benchmark consistency, not necessarily the
-fastest or cheapest configuration. This runtime is **not** translated
-into an AWS cost until an appropriate AWS reference configuration and
-pricing model have been selected.
+fastest or cheapest configuration. This runtime is used as a **planning
+input** on the Compute page but is **not** translated into an AWS cost
+until an appropriate AWS reference configuration and pricing model have
+been selected — the planner does not claim an AWS instance will reproduce
+this GCP runtime (spec 011 §8).
 
 This benchmark also provides useful external support for a roughly 40 GB
 30x CRAM planning value, but the project's 40 GB/sample WGS default stays
@@ -505,45 +538,56 @@ measured locally.
 
 ### 10.4 GLnexus cohort resources — Under investigation
 
-No benchmark exists yet. Required: research/benchmark GLnexus for
-representative cohort sizes (e.g. ~500 WGS samples).
+No benchmark exists yet. The Compute page shows GLnexus as the cohort
+joint-calling stage but explicitly excludes it from runtime/cost totals
+("No approved planning benchmark") rather than inventing a figure (spec 011
+§9). Required: research/benchmark GLnexus for representative cohort sizes
+(e.g. ~500 WGS samples).
 
-### 10.5 Intermediate/working compute storage — Under investigation
+### 10.5 Working compute storage — Implemented (initial planning-assumption model)
 
 Durable project storage (modelled in §5 above) is not the only storage
 requirement. Compute working storage is temporary/intermediate storage
 needed while jobs execute — e.g. compressed FASTQs being processed,
 alignment/sorting temporaries, BAM/CRAM intermediates, DeepVariant working
 files, workflow work directories, container temporary data, cohort-calling
-temporaries. This should eventually be modelled by processing stage and
-concurrency:
+temporaries. Implemented for V1 as a configurable planning assumption
+(`cbio_cost.compute.working_storage_result`):
 
-    simultaneous working storage ≈ scratch required per worker × concurrent workers
+    simultaneous working storage = scratch per worker x concurrent workers
 
-Storage cost must account for both provisioned capacity *and* lifetime —
-a fast, high-concurrency scenario may need substantially more simultaneous
-scratch but hold it for less time, so scratch cost does not scale directly
-with maximum capacity. Potential AWS implementations include EBS,
-instance-local NVMe, or shared filesystems; the final implementation
-should calculate working-storage cost per the selected architecture
-rather than one generic scratch price. **Current scratch requirements:
-Under investigation — benchmark required.**
+Default scratch/worker = 250 GiB, classified **Planning assumption** — not
+a measured BWA-MEM2 requirement, editable on the Compute page. Concurrent
+workers = `max(alignment concurrency, DeepVariant concurrency)`, a
+conservative upper bound reflecting the V1 sequential-stage model (§10.9).
+Storage cost must eventually account for both provisioned capacity *and*
+lifetime — a fast, high-concurrency scenario may need substantially more
+simultaneous scratch but hold it for less time, so scratch cost does not
+scale directly with maximum capacity. Potential AWS implementations include
+EBS gp3, instance-local NVMe, or shared filesystems; the final
+implementation should calculate working-storage cost per the selected
+architecture rather than one generic scratch price. **No CBIO measured
+scratch benchmark yet** — the 250 GiB default remains Under investigation
+for refinement.
 
 ### 10.6 Sentieon — Planned, Local commercial assumption
 
-A commercial accelerated alternative for the future Compute module.
-Current UCT planning licence rate:
+A commercial accelerated alternative for the future Compute module,
+surfaced (excluded from totals) on the Compute page. Current UCT planning
+licence rate:
 
     US$1.50 per genome
 
 Classified as **Local commercial assumption** — a current UCT planning
 value that must be confirmed for actual project budgeting, not public
-Sentieon list pricing. Example: 500 genomes × US$1.50 = US$750 licence
-cost. The software licence must be itemised separately from compute
-infrastructure, temporary storage, data transfer and durable storage;
-US$1.50/genome does not represent the total cost of running a Sentieon
-workflow. Sentieon runtime/performance remains **Under investigation**
-until appropriate local or published benchmarks are selected.
+Sentieon list pricing. Example: 500 genomes × US$1.50 = US$750 licence cost
+(R12,037.50 at the planner's illustrative R16.05/USD rate). The software
+licence must be itemised separately from compute infrastructure, temporary
+storage, data transfer and engineering; US$1.50/genome does not represent
+the total cost of running a Sentieon workflow. Sentieon remains **Planned /
+not included in current workflow** — runtime/performance remains **Under
+investigation** until appropriate local or published benchmarks are
+selected.
 
 ### 10.7 ICA / DRAGEN / iGG — Under investigation
 
@@ -569,33 +613,54 @@ pricing models may evolve, so this should eventually be
 configuration-driven and version/date-stamped rather than a permanent
 constant. ICA costing is **not** implemented as part of this document.
 
-### 10.8 Execution architecture — Planned
+### 10.8 Execution architecture — Implemented (recommendation), pricing Planned
 
-The planner should not assume Slurm is always the preferred execution
-environment. For highly parallel per-sample genomics processing on AWS,
-an architecture such as Nextflow + AWS Batch + containerised workers +
-object storage + appropriate temporary working storage may be suitable.
-Slurm remains valid where an HPC scheduler is appropriate. The eventual
-planner should recommend an execution architecture based on workload
-characteristics rather than always selecting one scheduler.
+The planner does not assume Slurm is always the preferred execution
+environment. For V1 (spec 011 §20), the Compute page documents an initial
+AWS architecture recommendation for the embarrassingly-parallel per-sample
+stages:
 
-### 10.9 Completion-time scenarios — Planned
+    Amazon S3 -> AWS Batch -> EC2 worker instances -> working storage
+      -> workflow outputs -> Amazon S3
 
-The Compute model should eventually support both resource/cost estimates
-and expected elapsed completion time:
+Region: **Africa (Cape Town)**, `af-south-1` — kept near the project's
+already-modelled AWS storage; cross-region transfer/governance implications
+are not modelled. AWS Batch itself has no additional service charge; EC2,
+working storage and data transfer are priced separately (`cbio_cost.compute
+.aws_execution_info`). Purchase model baseline for V1: **On-Demand**; Spot
+is a future/optional optimisation, no fixed discount is assumed (spec 011
+§25). Instance selection is represented only as a planning-level
+architecture recommendation, not a per-stage instance-type mapping — CPU/RAM
+requirements are kept independent of any specific instance choice
+(`EC2InstancePricing` exists in `cbio_cost/compute_models.py` as a reserved,
+unpopulated extension point). **AWS compute price: Pending verified regional
+pricing** — no `af-south-1` EC2 rate is invented; the Compute page shows this
+status explicitly rather than a `$0` or estimated figure. Workflow
+orchestration may later use Nextflow. Slurm remains valid where an HPC
+scheduler is appropriate; the planner does not always select one scheduler.
 
-- **Total compute consumption**, e.g. `jobs × runtime × resources`
-- **Concurrency** — number of jobs executing simultaneously
-- **Estimated wall-clock completion** — approximately
-  `number of jobs ÷ concurrency × runtime per job`, with additional
-  workflow/stage constraints
+### 10.9 Completion-time scenarios — Partially implemented
 
-The eventual tool may support Cost-efficient / Balanced / Fast scenarios
-and/or a user-selected target completion time (e.g. "Target completion:
-7 days") to estimate required concurrency. Compute cost is not assumed
-identical between scenarios — instance price/performance, scaling
-efficiency, storage lifetime, provisioning, Spot availability and other
-factors may cause differences.
+Implemented for V1 (`cbio_cost.compute.concurrency_result`, spec 011 §14):
+
+- **Worker-hours** — `samples × runtime per sample`
+- **Concurrency** — user-configurable, separately for alignment and
+  DeepVariant
+- **Idealised elapsed time** — `waves × runtime per sample`, where
+  `waves = ceil(samples / concurrency)`
+
+The Compute page's "known modelled elapsed time" sums the alignment and
+DeepVariant idealised elapsed times, treating the two per-sample stages as
+fully sequential across the whole cohort — a defensible worst-case, not a
+pipelined estimate — and excludes GLnexus, CRAM indexing and workflow
+overhead (queue delay, instance startup, retries, staging, interruptions,
+contention), all clearly labelled (spec 011 §18; decision record §13).
+
+**Still Planned**: Cost-efficient / Balanced / Fast scenario presets, and a
+user-selected target completion time used to derive required concurrency.
+Compute cost is not assumed identical between such scenarios — instance
+price/performance, scaling efficiency, storage lifetime, provisioning, Spot
+availability and other factors may cause differences.
 
 ---
 
@@ -676,14 +741,18 @@ storage resource if it is intentionally reused for multiple purposes.
 | 30x WGS CRAM | 40 GB/sample | Planning assumption | Supported by DeepVariant docs' ~40 GB reference; local measurement pending |
 | 30x WGS gVCF/QC/indexes | 10 GB/sample | Planning assumption | Generic planning value; does not scale linearly with depth |
 | Data volume reference guide (4x/12x/30x/WES/RNA-seq/array) | See §7 | Planning assumption | Informational only; never feeds a calculation |
-| BWA-MEM2 runtime | TBD | Measured (pending) | Ilifu benchmark planned, §10.2 |
-| BWA-MEM2 scratch | TBD | Measured (pending) | Ilifu benchmark planned, §10.2 |
+| BWA-MEM2 + sort runtime (NA12878) | 4.945 h/sample | Measured — CBIO/Ilifu | 32-core Xeon Gold 6142, hg38, §10.2 |
+| BWA-MEM2 CPU consumption (NA12878) | ≈68.1 core-hours/sample | Measured — CBIO/Ilifu | (user+sys CPU time)/3600, not 32×wall time, §10.2 |
+| BWA-MEM2 peak RAM (NA12878) | ≈116.7 GiB | Measured — CBIO/Ilifu | Max RSS, §10.2 |
+| Alignment planning RAM allocation | 160 GiB | Planning assumption | Headroom over measured peak, §10.2 |
+| CRAM index runtime (NA12878) | ≈15.1 min/sample | Measured — CBIO/Ilifu | `samtools index -@32`, lightweight, §10.2 |
+| Scratch/worker (working storage) | 250 GiB/worker | Planning assumption | Editable; no CBIO measured benchmark yet, §10.5 |
 | DeepVariant CPU runtime | ~1h09/sample on 96-vCPU/384-GiB reference config | Published benchmark | DeepVariant v1.10, §10.3 |
 | GLnexus cohort resources | TBD | — | Research/benchmark required, §10.4 |
-| Compute working storage | TBD | Measured/planning (pending) | Benchmark required, §10.5 |
-| Sentieon licence | US$1.50/genome | Local commercial assumption | Current UCT planning rate, §10.6 |
+| Sentieon licence | US$1.50/genome (500 genomes = US$750 / R12,037.50) | Local commercial assumption | Current UCT planning rate, §10.6 |
 | Sentieon runtime | TBD | — | Research/benchmark required, §10.6 |
 | AWS S3/egress/request pricing | Config-driven (`config/aws-pricing.yaml`) | Published pricing (per-rate: UNVERIFIED) | af-south-1; see §6 |
+| AWS compute (EC2) pricing | Pending verified regional pricing | — | Not invented; region af-south-1 recommended, §10.8 |
 | USD/ZAR exchange rate | 16.05 (as of 2026-09-14) | Planning assumption | Placeholder; confirm against approved UCT/CBIO source |
 | VAT | 15% | Planning assumption | Applied to AWS costs only |
 | Engineering hourly rate | R1,000/hour | Planning assumption | Explicitly not an approved institutional rate |
@@ -709,6 +778,10 @@ Dated: 2026-09-15.
 | **Transfer bandwidth**: do not infer sustained bandwidth from geography | Achievable throughput depends on routing, peering, congestion and endpoint performance, not distance; prefer measured throughput, known link capacity, or explicit scenarios |
 | **Latency**: treat RTT as a feasibility/performance characteristic, not an arbitrary duration penalty | Bandwidth is the primary duration driver; latency affects whether that bandwidth is actually achievable, which is a different (BDP/TCP-tuning) concern |
 | **Evidence**: distinguish Measured, Published benchmark, Planning assumption and Local commercial assumption throughout | Prevents a rough planning number from being mistaken for a measured or authoritative one when budgeting real projects |
+| **Compute V1 scope** (spec 011): support only the WGS 30x project profile; Custom Project shows a guard message rather than a Compute result | The reference workflow, benchmark and sample-count assumptions are WGS-30x-specific; extending to arbitrary Custom Project datasets needs separate design |
+| **Compute V1 "known modelled elapsed time"**: sum the alignment and DeepVariant idealised elapsed times as if fully sequential across the whole cohort | A true pipelined estimate is workflow-overhead modelling that spec 011 explicitly defers; a labelled worst-case sum is defensible and transparent in the meantime |
+| **CRAM indexing and GLnexus excluded from Compute V1 totals** | CRAM indexing is measured as lightweight/negligible; GLnexus has no approved benchmark — showing either as included would misrepresent runtime |
+| **No per-stage AWS instance-type mapping in Compute V1** | No verified af-south-1 EC2 pricing exists in the repository; CPU/RAM requirements are kept independent of any specific instance choice until pricing is confirmed (spec 011 §22-§23) |
 
 ---
 
@@ -716,19 +789,22 @@ Dated: 2026-09-15.
 
 ### Compute
 
-- Run BWA-MEM2 FASTQ → CRAM benchmark on Ilifu; measure wall time, CPU and
-  RAM; measure/estimate peak working storage; record resulting CRAM size.
 - Select representative AWS Cape Town instance types; verify current
-  af-south-1 compute pricing.
+  af-south-1 compute (EC2) and working-storage (EBS) pricing.
 - Determine suitable temporary storage architecture and pricing.
-- Compare Ilifu measurement with AWS execution.
+- Compare the measured Ilifu NA12878 benchmark with an AWS execution of the
+  same workflow.
 - Validate DeepVariant AWS resource configuration.
 - Research/benchmark GLnexus for approximately 500 WGS samples.
+- Benchmark scratch/working-storage requirements to replace the 250
+  GiB/worker planning default.
 - Investigate Spot versus On-Demand economics.
 - Investigate Sentieon runtime/performance using appropriate evidence;
   validate the UCT Sentieon commercial assumption before real budgeting.
 - Research ICA/DRAGEN runtime and current iCredit/commercial model;
   research iGG separately from per-sample DRAGEN processing.
+- Extend Compute modelling to Custom Project mode.
+- Design and implement Cost-efficient / Balanced / Fast scenario presets.
 
 ### Transfer
 
@@ -765,8 +841,15 @@ until they have been evaluated.
 - Runtime depends strongly on hardware, I/O, software version and
   workflow configuration.
 - Network throughput cannot be predicted reliably from geography alone.
-- Compute, Transfer and a cross-module Project Summary are not yet
-  implemented.
+- Compute is implemented only for the WGS 30x profile's open-source
+  reference workflow (§10); GLnexus, AWS compute pricing, Sentieon/ICA
+  runtime, Custom Project compute, and Transfer are not yet implemented.
+- The BWA-MEM2 benchmark behind Compute's alignment stage is one measured
+  NA12878 execution on Ilifu hardware — not universal BWA-MEM2 performance,
+  and AWS performance cannot be inferred exactly from Ilifu core counts.
+- Compute's "known modelled elapsed time" excludes GLnexus, CRAM indexing
+  and workflow overhead (queue delay, instance startup, retries, staging,
+  interruptions, contention) — see §10.9.
 - Sensitive-data governance remains project/institution specific; the
   planner does not perform that assessment.
 - The planner does not constitute infrastructure, security, ethics,
