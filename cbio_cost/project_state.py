@@ -213,6 +213,14 @@ def transfer_status(state: ProjectState) -> str:
         return INVALID
     if state.transfer_result is None:
         return NOT_CONFIGURED
+    if state.transfer_result.duration_hours is None:
+        # spec 013a §12-§16: a page visit alone must not read as Complete.
+        # duration_hours is None if and only if throughput_mode == "unknown"
+        # (cbio_cost/transfer_plan.py) -- the default state, and a valid
+        # TransferPlan, but not a genuine estimate: no throughput was ever
+        # provided, so no duration was ever calculated. Location/RTT/note/
+        # transfer method remain optional and never gate status.
+        return NOT_CONFIGURED
     if state.transfer_calculated_for != (state.project_revision, state.transfer_config_revision):
         return NEEDS_REVIEW
     return COMPLETE

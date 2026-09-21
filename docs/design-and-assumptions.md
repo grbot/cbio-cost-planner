@@ -356,6 +356,51 @@ purely cosmetic, high-churn renames with no behavioural fix behind them.
 | Streamlit widget keys | No | No | Yes | `st.session_state`, healed via `sync_widget_defaults` |
 | Custom-dataset bookkeeping (`custom_dataset_ids`, `custom_next_id`) | No | No | Yes | `st.session_state` — resolved into canonical `custom_datasets` on capture |
 
+### Project setup and status closure (spec 013a)
+
+**Project setup is shared application context, not owned by Storage.**
+`project_setup.py` (new, root-level, alongside `app.py`/`theme.py`/
+`navigation.py` — not a navigable `st.Page`) renders a compact project
+identity line, an "Edit project" expander (project type, name, samples,
+retention, "Load Example"), and "New project", exactly once per script
+run from `app.py`, before `st.navigation(...).run()` dispatches to
+whichever page is active — so it appears identically on every page without
+being duplicated per page. `views/storage.py` no longer draws the
+`project_mode` radio or the project name/samples/retention/Load-Example
+widgets itself; it reads the same `st.session_state` keys, now drawn
+earlier in the same script run by `project_setup.render_project_area()`.
+The compact identity line reads directly from raw widget state, not from
+`build_project(state)`/`project_configured` — those only update once
+Storage's own `record_storage()` runs later in the same script pass, so
+using them here would show a stale "Not yet configured" for the entire
+render immediately after Load Example or a direct project-field edit
+(Streamlit does not retroactively update already-emitted markdown).
+
+**"New project" is the one atomic reset transition**:
+`project_setup.reset_project()` calls `st.session_state.clear()` then
+`storage.ensure_project_state()` — the exact bootstrap a genuinely fresh
+session goes through — rather than hand-enumerating every canonical/widget
+key to reset. This is what makes the reset atomic and immune to ghost
+widget state by construction: nothing survives `clear()` for a stale key
+to "heal" from. A `st.dialog`-confirmed action (`_confirm_new_project()`)
+calls `reset_project()` then `st.switch_page` back to Storage. Storage's
+minimum-valid default still produces a genuine `Complete` Storage
+calculation after reset (unchanged, pre-existing semantics) —
+`project_configured`, not `storage_status`, is what distinguishes "the
+minimum default" from "a real project."
+
+**Module status is tightened so a page visit alone cannot read as
+`Complete`.** `transfer_status()` now also requires
+`state.transfer_result.duration_hours is not None` — `duration_hours` is
+`None` if and only if `throughput_mode == "unknown"` (Transfer's own
+default state), a valid `TransferPlan` but never a genuine estimate.
+Compute's status is unchanged: its default assumptions (10/10 concurrency,
+250 GiB scratch) are real planning values, not a placeholder, so Compute
+becoming `Complete` once a configured project exists and the model can
+calculate — including on first visit — remains intentional, not a status
+defect. Transfer method remains optional/descriptive and never gates
+status, matching its existing UI caption.
+
 **Guided flow, completed** (spec 012a §14-§16, completed in spec 012c
 §18-21): a restrained, text-only status line ("1 Storage: Complete · 2
 Compute: Complete · 3 Transfer: Needs review · 4 Project Summary")

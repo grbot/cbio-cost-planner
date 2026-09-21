@@ -173,7 +173,7 @@ def _minimum_valid_state() -> dict:
     # _default_state() and overrides only the project-identity fields that
     # made the app look like a specific real 500-sample project on first
     # load. The full 500x30x/5-year example remains available via the
-    # explicit "Load demo profile" button (_load_demo_profile() below).
+    # explicit "Load demo profile" button (load_demo_profile() below).
     state = _default_state()
     state["project_name"] = ""
     state["num_samples"] = 1
@@ -181,7 +181,12 @@ def _minimum_valid_state() -> dict:
     return state
 
 
-def _load_demo_profile() -> None:
+def load_demo_profile() -> None:
+    """Project-level action (spec 013a §26): atomically loads the full
+    500x30x/5-year example into canonical widget state. Called from the
+    shared Project setup area (``project_setup.py``), not owned by Storage
+    -- the example project spans project identity plus every module's
+    planning defaults in one profile."""
     st.session_state.update(_default_state())
 
 
@@ -340,21 +345,14 @@ def render() -> None:
         "Early-stage planning and grant-budgeting tool for CBIO genomics projects. "
         "This is a planning estimate, not an AWS billing system."
     )
-    st.button("Load 500 x 30x WGS / 5-year demo profile", key="load_demo_button", on_click=_load_demo_profile)
 
     pricing = _load_pricing()
     _, wgs_scenario_overlays = _load_profile_and_scenarios()
 
-    # ---------------------------------------------------------------------------
-    # Project mode (spec 006 §1)
-    # ---------------------------------------------------------------------------
-    st.radio(
-        "Project mode",
-        options=[WGS_MODE, CUSTOM_MODE],
-        key="project_mode",
-        horizontal=True,
-        label_visibility="collapsed",
-    )
+    # Project mode (spec 006 §1) is now project-level configuration, set by
+    # the shared Project setup area (project_setup.py, spec 013a §19-§23),
+    # which always renders earlier in the same script run (app.py). Storage
+    # only reads the resulting canonical value.
     is_wgs_mode = st.session_state["project_mode"] == WGS_MODE
 
     # ---------------------------------------------------------------------------
@@ -389,32 +387,16 @@ def render() -> None:
             "measured project volumes are available, use those instead."
         )
 
-    # ---------------------------------------------------------------------------
-    # 1. Project
-    # ---------------------------------------------------------------------------
-    with st.container(border=True, key="section_1"):
-        theme.section_header(1, "Project")
-        if is_wgs_mode:
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.text_input("Project name", key="project_name")
-            with col2:
-                st.number_input("Number of samples", min_value=1, step=1, key="num_samples")
-            with col3:
-                st.number_input("Retention period (years)", min_value=0.1, step=0.5, key="retention_years")
-        else:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.text_input("Project name", key="project_name")
-            with col2:
-                st.number_input("Retention period (years)", min_value=0.1, step=0.5, key="retention_years")
+    # Project name/samples/retention are also project-level (spec 013a §24)
+    # and are rendered by the shared Project setup area — Storage below
+    # reads them via st.session_state as canonical values, same as before.
 
     # ---------------------------------------------------------------------------
     # 2. Project datasets (mode-dependent construction, spec 006 §1-§4)
     # ---------------------------------------------------------------------------
-    with st.container(border=True, key="section_2"):
+    with st.container(border=True, key="section_1"):
         if is_wgs_mode:
-            theme.section_header(2, "WGS 30x data volume & movement")
+            theme.section_header(1, "WGS 30x data volume & movement")
             st.caption(
                 "The WGS 30x profile already assumes 30x sequencing depth — per-sample volumes "
                 "below already reflect that and are not scaled again."
@@ -471,7 +453,7 @@ def render() -> None:
 
                 st.number_input("Active S3 Standard period (months)", min_value=0.0, step=1.0, key="active_months")
         else:
-            theme.section_header(2, "Custom Project datasets")
+            theme.section_header(1, "Custom Project datasets")
             st.caption(
                 "Define one or more datasets and describe how each dataset will be stored and "
                 "accessed. Use this mode for projects that do not yet have a predefined CBIO "
@@ -563,8 +545,8 @@ def render() -> None:
     # ---------------------------------------------------------------------------
     # 3. Data movement & transfer (project-level, shared by both modes)
     # ---------------------------------------------------------------------------
-    with st.container(border=True, key="section_3"):
-        theme.section_header(3, "Data movement & transfer")
+    with st.container(border=True, key="section_2"):
+        theme.section_header(2, "Data movement & transfer")
         st.caption(
             "Data transferred into AWS: AWS internet data-transfer charge: $0. This does not "
             "mean S3 PUT/API requests are free — request and lifecycle-transition costs are "
@@ -581,8 +563,8 @@ def render() -> None:
     # ---------------------------------------------------------------------------
     # 4. Infrastructure engineering
     # ---------------------------------------------------------------------------
-    with st.container(border=True, key="section_4"):
-        theme.section_header(4, "Infrastructure engineering / management")
+    with st.container(border=True, key="section_3"):
+        theme.section_header(3, "Infrastructure engineering / management")
         _current_rate = st.session_state.get("hourly_rate_zar", 0)
         theme.callout(
             f"Illustrative engineering rate: R{_current_rate:,.0f}/hour",
@@ -602,8 +584,8 @@ def render() -> None:
     # ---------------------------------------------------------------------------
     # 5. Ilifu compute
     # ---------------------------------------------------------------------------
-    with st.container(border=True, key="section_5"):
-        theme.section_header(5, "Ilifu compute")
+    with st.container(border=True, key="section_4"):
+        theme.section_header(4, "Ilifu compute")
         theme.callout(
             "Compute infrastructure cost not yet included",
             "Compute runtime and resource planning are available on the Compute page. "
@@ -620,8 +602,8 @@ def render() -> None:
     # ---------------------------------------------------------------------------
     # 6. Currency
     # ---------------------------------------------------------------------------
-    with st.container(border=True, key="section_6"):
-        theme.section_header(6, "Currency assumptions")
+    with st.container(border=True, key="section_5"):
+        theme.section_header(5, "Currency assumptions")
         ccol1, ccol2 = st.columns(2)
         with ccol1:
             st.number_input("USD/ZAR exchange rate", min_value=0.01, step=0.05, key="usd_zar")
@@ -722,8 +704,8 @@ def render() -> None:
     # ---------------------------------------------------------------------------
     # 7. Cost output
     # ---------------------------------------------------------------------------
-    with st.container(border=True, key="section_7"):
-        theme.section_header(7, "Cost summary")
+    with st.container(border=True, key="section_6"):
+        theme.section_header(6, "Cost summary")
 
         raw_tb = gb_to_tb(estimate.volume.raw_total_gb)
         envelope_tb = gb_to_tb(estimate.volume.envelope_gb)
@@ -797,8 +779,8 @@ def render() -> None:
     # ---------------------------------------------------------------------------
     # 8. Sensitivity analysis
     # ---------------------------------------------------------------------------
-    with st.container(border=True, key="section_8"):
-        theme.section_header(8, "Sensitivity analysis")
+    with st.container(border=True, key="section_7"):
+        theme.section_header(7, "Sensitivity analysis")
         st.caption("Demonstrates that transfer behaviour can materially change total project cost.")
 
         sensitivity_rows: list[list[str]] = []
@@ -838,8 +820,8 @@ def render() -> None:
     # ---------------------------------------------------------------------------
     # 9. Explanation
     # ---------------------------------------------------------------------------
-    with st.container(border=True, key="section_9"):
-        theme.section_header(9, "Result explanation")
+    with st.container(border=True, key="section_8"):
+        theme.section_header(8, "Result explanation")
         theme.callout("Summary", estimate.explanation)
 
     # ---------------------------------------------------------------------------
@@ -869,8 +851,8 @@ def render() -> None:
     # ---------------------------------------------------------------------------
     # 10. Pricing & assumptions
     # ---------------------------------------------------------------------------
-    with st.container(border=True, key="section_10"):
-        theme.section_header(10, "Pricing & assumptions")
+    with st.container(border=True, key="section_9"):
+        theme.section_header(9, "Pricing & assumptions")
         st.markdown(
             "AWS storage, request, archive retrieval and data-transfer costs are based on "
             "published AWS pricing for the Africa (Cape Town) region (`af-south-1`). Prices "
@@ -917,8 +899,8 @@ def render() -> None:
     # ---------------------------------------------------------------------------
     # 11. Export
     # ---------------------------------------------------------------------------
-    with st.container(border=True, key="section_11"):
-        theme.section_header(11, "Export")
+    with st.container(border=True, key="section_10"):
+        theme.section_header(10, "Export")
         excol1, excol2, excol3 = st.columns(3)
         with excol1:
             st.download_button(

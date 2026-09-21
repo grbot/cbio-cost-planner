@@ -6,6 +6,8 @@ Deterministic, no Streamlit runtime widget interaction — exercises
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import streamlit as st
 
@@ -54,6 +56,12 @@ def _storage_widgets(**overrides) -> dict:
     }
     base.update(overrides)
     return base
+
+
+def _transfer_result(duration_hours=1.0) -> SimpleNamespace:
+    """Placeholder standing in for a real TransferPlanResult -- only the
+    ``duration_hours`` attribute transfer_status() reads is needed here."""
+    return SimpleNamespace(duration_hours=duration_hours)
 
 
 # 1. Revision bumping is scoped to the right counter ------------------------
@@ -251,7 +259,7 @@ def test_mark_transfer_invalid_does_not_touch_last_good_state():
 def test_transfer_status_invalid_overrides_complete():
     state = ProjectState()
     record_storage(state, _storage_widgets(), result="estimate")
-    record_transfer(state, "plan", {"transfer_measured_mbps": 777.0}, result="result")
+    record_transfer(state, "plan", {"transfer_measured_mbps": 777.0}, result=_transfer_result())
     assert transfer_status(state) == COMPLETE
 
     mark_transfer_invalid(state)
@@ -267,9 +275,9 @@ def test_transfer_status_invalid_even_with_no_prior_result():
 def test_transfer_status_returns_to_complete_after_successful_rerecord():
     state = ProjectState()
     record_storage(state, _storage_widgets(), result="estimate")
-    record_transfer(state, "plan-1", {"transfer_measured_mbps": 777.0}, result="result-1")
+    record_transfer(state, "plan-1", {"transfer_measured_mbps": 777.0}, result=_transfer_result())
     mark_transfer_invalid(state)
     assert transfer_status(state) == INVALID
 
-    record_transfer(state, "plan-2", {"transfer_measured_mbps": 500.0}, result="result-2")
+    record_transfer(state, "plan-2", {"transfer_measured_mbps": 500.0}, result=_transfer_result())
     assert transfer_status(state) == COMPLETE

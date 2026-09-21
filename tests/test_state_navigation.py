@@ -20,6 +20,7 @@ from cbio_cost.project_state import (
     COMPLETE,
     INVALID,
     NEEDS_REVIEW,
+    NOT_CONFIGURED,
     compute_status,
     get_module_status,
     get_project_state,
@@ -28,6 +29,8 @@ from cbio_cost.project_state import (
 )
 from cbio_cost.units import gb_to_tb
 from views import compute, storage, summary, transfer
+
+import project_setup
 
 TRACKED_KEYS = [
     "num_samples",
@@ -46,7 +49,7 @@ def _configure_reviewed_scenario() -> None:
     """spec 012a §35: 500 samples/5yr, 7/13 workers, 333 GiB scratch, FASTQ
     measured 777 Mbps — the exact deployed reviewed example."""
     storage.ensure_project_state()
-    storage._load_demo_profile()
+    storage.load_demo_profile()
     project = storage._build_project_from_session_state()
     st.session_state["project"] = project
     storage.render()
@@ -327,7 +330,9 @@ def test_transfer_known_capacity_mode_survives_round_trip():
 
 
 def test_transfer_unknown_mode_survives_round_trip():
-    """spec 012c §9: unknown mode and its scenario table survive too."""
+    """spec 012c §9: unknown mode and its scenario table survive too. spec
+    013a §12-§16: unknown mode never produces a genuine duration, so status
+    is NOT_CONFIGURED, not COMPLETE, however many pages are visited."""
     st.session_state.clear()
     storage.ensure_project_state()
     storage.render()
@@ -338,7 +343,7 @@ def test_transfer_unknown_mode_survives_round_trip():
 
     assert st.session_state["transfer_throughput_mode"] == "unknown"
     state = get_project_state()
-    assert transfer_status(state) == COMPLETE
+    assert transfer_status(state) == NOT_CONFIGURED
     assert len(state.transfer_result.scenarios) > 0
 
 
@@ -574,6 +579,8 @@ def test_transfer_locations_survive_widget_key_deletion():
     st.session_state.update(
         {
             "transfer_dataset_choice": "FASTQ",
+            "transfer_throughput_mode": "measured",
+            "transfer_measured_mbps": 777.0,
             "transfer_source_location": "Cape Town test location",
             "transfer_destination_location": "AWS Cape Town test location",
         }
@@ -1002,3 +1009,178 @@ def test_summary_never_presents_stale_compute_or_transfer_as_current():
     summary.render()  # must not raise, must not silently upgrade either to Complete
     assert compute_status(state) == NEEDS_REVIEW
     assert transfer_status(state) == NEEDS_REVIEW
+
+
+# 10. Status tightening -- a page visit alone must not be Complete (spec 013a §12-§18)
+
+
+def test_transfer_fresh_visit_is_not_configured_not_complete():
+    """Transfer's default state (throughput_mode == "unknown") is a valid
+    TransferPlan but never a genuine estimate -- opening the page must not
+    read as Complete."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    transfer.render()
+
+    state = get_project_state()
+    assert transfer_status(state) == NOT_CONFIGURED
+
+
+def test_transfer_becomes_complete_once_measured_throughput_configured():
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.render()
+    transfer.render()
+    state = get_project_state()
+    assert transfer_status(state) == NOT_CONFIGURED
+
+    st.session_state.update({"transfer_throughput_mode": "measured", "transfer_measured_mbps": 777.0})
+    transfer.render()
+    assert transfer_status(state) == COMPLETE
+
+
+def test_navigation_alone_does_not_fabricate_transfer_complete():
+    """spec 013a §15: simply navigating Storage -> Compute -> Transfer with
+    zero edits must not automatically produce Transfer Complete. Compute
+    becoming Complete from its own reasonable default assumptions (10/10
+    concurrency, 250 GiB scratch -- real planning values, not a
+    placeholder) is intentional (spec 013a §18), not a status defect."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.render()
+    compute.render()
+    transfer.render()
+
+    state = get_project_state()
+    assert compute_status(state) == COMPLETE
+    assert transfer_status(state) == NOT_CONFIGURED
+
+
+# 11. Transfer persistence gate (spec 013a §3-§11) ----------------------------
+
+
+def test_transfer_full_distinctive_configuration_survives_013a_gate_sequence():
+    """spec 013a §11's exact acceptance gate, reproduced with real
+    widget-key deletion between renders (the actual Streamlit widget-
+    removal mechanism, not just a same-process function call). This could
+    not be reproduced against current code -- see completion report -- so
+    this pins the correct (surviving) behaviour as a permanent regression
+    test rather than leaving it unverified."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_throughput_mode": "measured",
+            "transfer_measured_mbps": 777.0,
+            "transfer_method": "Globus",
+            "transfer_rtt_enabled": True,
+            "transfer_rtt_ms": 137.0,
+            "transfer_source_location": "Cape Town test source",
+            "transfer_destination_location": "AWS Cape Town test destination",
+            "transfer_measured_note": "013a persistence test",
+        }
+    )
+    transfer.render()
+
+    _delete_keys(*ALL_TRANSFER_WIDGET_KEYS)
+    summary.render()
+    storage.render()
+    compute.render()
+    transfer.render()
+
+    assert st.session_state["transfer_dataset_choice"] == "FASTQ"
+    assert st.session_state["transfer_throughput_mode"] == "measured"
+    assert st.session_state["transfer_measured_mbps"] == 777.0
+    assert st.session_state["transfer_method"] == "Globus"
+    assert st.session_state["transfer_rtt_enabled"] is True
+    assert st.session_state["transfer_rtt_ms"] == 137.0
+    assert st.session_state["transfer_source_location"] == "Cape Town test source"
+    assert st.session_state["transfer_destination_location"] == "AWS Cape Town test destination"
+    assert st.session_state["transfer_measured_note"] == "013a persistence test"
+    state = get_project_state()
+    assert transfer_status(state) == COMPLETE
+
+
+# 12. New project (spec 013a §32-§46) -----------------------------------------
+
+
+def _configure_full_project_for_reset_tests() -> None:
+    _configure_reviewed_scenario()  # 500 samples, 7/13/333, FASTQ measured 777
+    st.session_state.update({"transfer_rtt_enabled": True, "transfer_rtt_ms": 137.0})
+    transfer.render()
+
+
+def test_reset_project_clears_configuration_status_and_results():
+    st.session_state.clear()
+    _configure_full_project_for_reset_tests()
+    assert get_project_state().project_configured is True
+
+    project_setup.reset_project()
+
+    state = get_project_state()
+    assert state.project_configured is False
+    assert compute_status(state) == NOT_CONFIGURED
+    assert transfer_status(state) == NOT_CONFIGURED
+    # Storage's minimum-valid default still produces a genuine calculation
+    # (unchanged, pre-existing semantics spec 013a §48 explicitly reaffirms
+    # keeping) -- project_configured, not storage_status, is what
+    # distinguishes "the minimum default" from "a real project".
+    assert storage_status(state) == COMPLETE
+
+
+def test_reset_project_ghost_state_does_not_resurrect_old_values():
+    """spec 013a §43, §66: after New project, no old widget value may
+    reappear, across every page."""
+    st.session_state.clear()
+    _configure_full_project_for_reset_tests()
+
+    project_setup.reset_project()
+
+    storage.render()
+    compute.render()
+    transfer.render()
+    summary.render()
+    storage.render()
+
+    assert st.session_state["num_samples"] == 1
+    assert st.session_state["compute_alignment_concurrency"] == 10
+    assert st.session_state["compute_deepvariant_concurrency"] == 10
+    assert st.session_state["transfer_measured_mbps"] == 0.0
+    assert st.session_state["transfer_rtt_enabled"] is False
+    assert st.session_state["transfer_rtt_ms"] == 0.0
+
+
+def test_reset_project_then_load_example_reproduces_clean_demo():
+    """spec 013a §45: reset and profile loading are clean inverse
+    transitions."""
+    st.session_state.clear()
+    _configure_full_project_for_reset_tests()
+    project_setup.reset_project()
+
+    storage.load_demo_profile()
+    storage.render()
+
+    assert st.session_state["project_name"] == "Example WGS Project"
+    assert st.session_state["num_samples"] == 500
+    assert st.session_state["retention_years"] == 5.0
+    state = get_project_state()
+    assert state.project_configured is True
+    assert storage_status(state) == COMPLETE
+
+
+def test_load_example_then_reset_project_leaves_fresh_state():
+    """spec 013a §46: the reverse order leaves no demo values behind."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.render()
+    assert get_project_state().project_configured is True
+
+    project_setup.reset_project()
+
+    state = get_project_state()
+    assert state.project_configured is False
+    assert st.session_state["num_samples"] == 1
+    assert st.session_state["project_name"] == ""

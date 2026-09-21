@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+import project_setup
 import theme
 from navigation import PAGES
 from views import storage
@@ -26,5 +27,10 @@ theme.header()
 # Compute/Transfer/Project Summary would otherwise never see Storage's
 # session-state bootstrap.
 storage.ensure_project_state()
+
+# Shared Project setup area (spec 013a §19-§31) — project identity, type,
+# Load Example and New project — rendered once here so it appears
+# identically on every page, never duplicated per view.
+project_setup.render_project_area()
 
 st.navigation(PAGES, position="top").run()
