@@ -1,10 +1,15 @@
-"""Compute module — WGS 30x resource, runtime, working-storage and AWS
-execution-architecture planner (spec 011).
+"""Compute module — WGS 30x resource, runtime, working-storage and
+execution-environment planner (spec 011; refined in spec 011a).
 
 Only widget reading and rendering happens here; every calculation runs in
 ``cbio_cost.compute`` / ``cbio_cost.compute_benchmarks``. V1 supports the WGS
-30x project profile only (spec 011 objective) — Custom Project compute
-modelling is a later iteration.
+30x project profile only — Custom Project compute modelling is a later
+iteration.
+
+Workflow (what processing occurs) and execution environment (where/how it
+runs) are deliberately rendered as separate sections (spec 011a §4): the
+Workflow section below never mentions AWS/HPC, and the Execution environment
+section never re-describes the biological/computational steps.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from cbio_cost.evidence import Evidence
 from cbio_cost.project import PROJECT_SESSION_KEY, Project
 
 WORKFLOW_STEPS = ["FASTQ", "BWA-MEM2", "CRAM", "DeepVariant", "gVCF", "GLnexus", "cohort VCF"]
+WORKFLOW_SUBTITLES: list[str | None] = [None, "modelled", None, "modelled", None, "benchmark pending", None]
 AWS_DEFAULT_USD_ZAR = Decimal("16.05")
 
 
@@ -44,12 +50,14 @@ def _default_state() -> dict:
     }
 
 
-def _resource_text(cpu, memory_gib) -> str:
+def _stage_resource_text(stage) -> str:
+    if stage.name == "CRAM index":
+        return bm.CRAM_INDEX_RESOURCE_NOTE
     parts = []
-    if cpu is not None:
-        parts.append(f"{cpu} CPU")
-    if memory_gib is not None:
-        parts.append(f"{memory_gib:g} GiB")
+    if stage.cpu is not None:
+        parts.append(f"{stage.cpu} CPU")
+    if stage.memory_gib is not None:
+        parts.append(f"{stage.memory_gib:g} GiB")
     return " / ".join(parts) if parts else "not modelled"
 
 
@@ -59,10 +67,19 @@ def _runtime_text(runtime_hours) -> str:
     return f"{runtime_hours:.2f} h"
 
 
-def _evidence_cell(evidence: Evidence | None) -> str:
-    if evidence is None:
+def _evidence_cell(evidence: dict[str, Evidence]) -> str:
+    """Every distinct evidence classification present on a stage — a stage
+    mixing measured and planning-assumption values must not be shown under a
+    single evidence label (spec 011a §7)."""
+    if not evidence:
         return "Benchmark pending"
-    return f"<strong>{evidence.label}</strong>"
+    labels: list[str] = []
+    seen: set[str] = set()
+    for ev in evidence.values():
+        if ev.label not in seen:
+            seen.add(ev.label)
+            labels.append(ev.label)
+    return " + ".join(f"<strong>{label}</strong>" for label in labels)
 
 
 def _evidence_block(label: str, evidence: Evidence) -> None:
@@ -106,37 +123,96 @@ def render() -> None:
 
         if not is_wgs:
             theme.callout(
-                "WGS 30x project required",
+                "Project required",
+                "Configure a project in Storage before calculating Compute requirements. "
                 "Compute planning currently supports the WGS 30x project profile (30x whole-genome "
-                "sequencing, BWA-MEM2 + DeepVariant + GLnexus workflow). Configure a WGS 30x project "
-                "on the Storage page to see Compute estimates. Custom Project compute modelling is "
-                "planned for a later iteration.",
+                "sequencing, BWA-MEM2 + DeepVariant + GLnexus workflow). Custom Project compute "
+                "modelling is planned for a later iteration.",
             )
             return
 
         num_samples = project.metadata.num_samples
-        st.markdown(f"**Project:** {project.metadata.name}  \n**Profile:** {num_samples} × 30× WGS")
+        project_name = project.metadata.name or "Untitled project"
+        st.markdown(f"**Project:** {project_name}  \n**Profile:** {num_samples} × 30× WGS")
 
     if "compute_loaded" not in st.session_state:
         st.session_state.update(_default_state())
         st.session_state["compute_loaded"] = True
 
     # ---------------------------------------------------------------------
-    # 2. Workflow
+    # 2. Workflow — what processing occurs (spec 011a §4)
     # ---------------------------------------------------------------------
     with st.container(border=True, key="section_compute_workflow"):
         theme.section_header(2, "Workflow")
-        theme.process_diagram(WORKFLOW_STEPS, accent_indices={5})
+        theme.process_diagram(WORKFLOW_STEPS, subtitles=WORKFLOW_SUBTITLES)
         st.caption(
-            "Open-source 30x WGS reference workflow (spec 011). GATK/Sentieon/DRAGEN are future "
-            "workflow alternatives, not implemented here."
+            "Open-source 30x WGS reference workflow. GATK, Sentieon and DRAGEN/ICA are future "
+            "workflow/execution alternatives — see Alternative execution options below."
         )
 
     # ---------------------------------------------------------------------
-    # 3. Compute configuration
+    # 3. Execution environment — where/how the workflow runs (spec 011a §4-§5,
+    #    §18, §20-§21). Independent of the concurrency/scratch configuration
+    #    below, so it can be shown before the user configures anything.
+    # ---------------------------------------------------------------------
+    aws_info = compute_engine.aws_execution_info()
+    hpc_info = compute_engine.hpc_execution_info()
+
+    with st.container(border=True, key="section_compute_execenv"):
+        theme.section_header(3, "Execution environment")
+        st.caption(
+            "The workflow above describes what processing occurs. Execution environment "
+            "describes where and how it runs — a separate planning dimension."
+        )
+
+        st.markdown("**Ilifu / HPC**")
+        theme.callout(
+            hpc_info.status,
+            "No HPC monetary cost is currently calculated — this does not mean HPC execution is "
+            "free, only that institutional HPC charging/cost allocation is not currently modelled. "
+            "Resource and runtime planning below already draw on Ilifu/HPC evidence.",
+        )
+        hcol1, hcol2, hcol3 = st.columns(3)
+        hcol1.metric("Alignment evidence", hpc_info.alignment_runtime_evidence.label)
+        hcol2.metric("DeepVariant evidence", hpc_info.deepvariant_runtime_evidence.label)
+        hcol3.metric("GLnexus", hpc_info.glnexus_status)
+        st.caption(
+            f"Monetary cost: {hpc_info.monetary_cost_status}. Working storage: "
+            f"{hpc_info.working_storage_status}. Scheduling: {hpc_info.scheduling_status}."
+        )
+
+        st.markdown("---")
+        st.markdown("**AWS**")
+        theme.process_diagram(aws_info.architecture_steps, accent_indices={1})
+        st.markdown(
+            f"**Region:** {aws_info.region_name} (`{aws_info.region_code}`) — kept near the "
+            "project's currently modelled AWS storage; cross-region transfer/governance implications "
+            "are not modelled."
+        )
+        st.caption(
+            "AWS Batch does not add a separate service charge. The EC2 worker compute, working "
+            "storage, durable S3 storage, data transfer and any software licensing used by the "
+            "workflow remain separately billable. Purchase model baseline: "
+            f"{aws_info.purchase_model} (Spot is a future/optional optimisation; no fixed discount "
+            "is assumed)."
+        )
+        theme.table(
+            columns=["Component", "Status"],
+            rows=[
+                ["Resource model", "Implemented"],
+                ["Runtime model", "Implemented"],
+                ["Working storage", "Implemented"],
+                ["AWS architecture", "Implemented"],
+                ["AWS price", aws_info.pricing_status],
+            ],
+            align=["left", "left"],
+        )
+
+    # ---------------------------------------------------------------------
+    # 4. Compute configuration
     # ---------------------------------------------------------------------
     with st.container(border=True, key="section_compute_config"):
-        theme.section_header(3, "Compute configuration")
+        theme.section_header(4, "Compute configuration")
         ccol1, ccol2, ccol3 = st.columns(3)
         with ccol1:
             st.number_input(
@@ -150,7 +226,12 @@ def render() -> None:
             st.number_input(
                 "Scratch GiB/worker", min_value=0.0, step=10.0, key="compute_scratch_gib_per_worker"
             )
-        st.caption("Scratch/worker is a planning assumption (spec 011 §13), not a measured BWA requirement.")
+        st.caption(
+            "Scratch/worker is a planning assumption, not a measured BWA requirement. The same "
+            "figure is currently used for both alignment and DeepVariant workers — each stage's "
+            "peak working storage is driven by its own concurrency setting (see Working storage "
+            "below)."
+        )
 
         ocol1, ocol2 = st.columns(2)
         with ocol1:
@@ -194,20 +275,19 @@ def render() -> None:
     result: ComputeResult = compute_engine.build_compute_result(num_samples, config, AWS_DEFAULT_USD_ZAR)
 
     # ---------------------------------------------------------------------
-    # 4. Workflow stages
+    # 5. Workflow stages
     # ---------------------------------------------------------------------
     with st.container(border=True, key="section_compute_stages"):
-        theme.section_header(4, "Workflow stages")
+        theme.section_header(5, "Workflow stages")
         rows = []
         for stage in result.stages:
-            evidence = stage.evidence.get("runtime") or next(iter(stage.evidence.values()), None)
             rows.append(
                 [
                     stage.name,
                     stage.scope.replace("_", " "),
-                    _resource_text(stage.cpu, stage.memory_gib),
+                    _stage_resource_text(stage),
                     _runtime_text(stage.runtime_hours),
-                    _evidence_cell(evidence),
+                    _evidence_cell(stage.evidence),
                     stage.status,
                 ]
             )
@@ -217,15 +297,15 @@ def render() -> None:
             align=["left", "left", "left", "right", "left", "left"],
         )
         st.caption(
-            "Resource values marked as a planning allocation (e.g. alignment RAM) are not the same "
-            "as a measured requirement — see Calculation basis & evidence below."
+            "Where a stage shows more than one evidence classification, resource values were not "
+            "all measured — see Calculation basis & evidence below for the per-value breakdown."
         )
 
     # ---------------------------------------------------------------------
-    # 5. Runtime summary
+    # 6. Runtime summary
     # ---------------------------------------------------------------------
     with st.container(border=True, key="section_compute_runtime"):
-        theme.section_header(5, "Runtime summary")
+        theme.section_header(6, "Runtime summary")
 
         st.markdown("**Alignment**")
         _runtime_override("alignment", bm.BWA_RUNTIME_EVIDENCE, "Alignment")
@@ -234,6 +314,14 @@ def render() -> None:
         acol2.metric("Worker-hours", f"{result.alignment.worker_hours:,.1f}")
         acol3.metric("Concurrency", str(result.alignment.concurrency))
         acol4.metric("Idealised elapsed", f"{result.alignment.idealised_elapsed_hours:,.2f} h")
+
+        st.markdown("**CRAM index**")
+        st.caption("Shares the alignment stage's concurrency — a lightweight downstream step on the same worker.")
+        icol1, icol2, icol3, icol4 = st.columns(4)
+        icol1.metric("Runtime/sample", f"{result.cram_index.runtime_per_unit_hours:.3f} h")
+        icol2.metric("Worker-hours", f"{result.cram_index.worker_hours:,.1f}")
+        icol3.metric("Concurrency", str(result.cram_index.concurrency))
+        icol4.metric("Idealised elapsed", f"{result.cram_index.idealised_elapsed_hours:,.2f} h")
 
         st.markdown("**DeepVariant**")
         _runtime_override("deepvariant", bm.DEEPVARIANT_RUNTIME_EVIDENCE, "DeepVariant")
@@ -252,64 +340,57 @@ def render() -> None:
 
         st.markdown("**Overall**")
         theme.headline(
-            "Known modelled elapsed time",
+            "Sequential-stage planning estimate",
             f"{result.known_modelled_elapsed_hours:,.2f} h",
-            "Estimated per-sample processing stages (alignment + DeepVariant, treated as fully "
-            "sequential across the cohort).",
+            "Assumes alignment, CRAM index and DeepVariant execute sequentially across the whole "
+            "cohort. Workflow pipelining may reduce elapsed time; pipelining is not currently "
+            "modelled.",
         )
-        st.warning(
-            "Excludes: " + ", ".join(result.excluded_stages) + ", and workflow overhead (queue delay, "
-            "instance startup, retries, data staging, interruptions, contention)."
-        )
+        st.warning("Excludes: " + ", ".join(result.excluded_stages) + ". " + result.unmodelled_overhead)
 
     # ---------------------------------------------------------------------
-    # 6. Working storage
+    # 7. Working storage
     # ---------------------------------------------------------------------
     with st.container(border=True, key="section_compute_storage"):
-        theme.section_header(6, "Working storage")
+        theme.section_header(7, "Working storage")
+        st.caption(
+            "The same scratch/worker planning assumption is currently used for both alignment and "
+            "DeepVariant workers; each stage's peak scratch is driven by its own concurrency setting."
+        )
         wcol1, wcol2, wcol3 = st.columns(3)
         wcol1.metric("Scratch / worker", f"{result.working_storage.scratch_per_worker_gib:g} GiB")
-        wcol2.metric("Concurrent workers", str(result.working_storage.concurrent_workers))
-        wcol3.metric("Peak simultaneous scratch", f"{result.working_storage.peak_simultaneous_gib:,.0f} GiB")
+        wcol2.metric(
+            "Alignment peak",
+            f"{result.working_storage.alignment_peak_gib:,.0f} GiB",
+            help=f"{result.working_storage.scratch_per_worker_gib:g} GiB × {result.working_storage.alignment_concurrency} alignment workers",
+        )
+        wcol3.metric(
+            "DeepVariant peak",
+            f"{result.working_storage.deepvariant_peak_gib:,.0f} GiB",
+            help=f"{result.working_storage.scratch_per_worker_gib:g} GiB × {result.working_storage.deepvariant_concurrency} DeepVariant workers",
+        )
+        theme.headline(
+            "Peak simultaneous working storage",
+            f"{result.working_storage.peak_simultaneous_gib:,.0f} GiB",
+            "max(alignment peak, DeepVariant peak) under the sequential-stage execution model — not "
+            "their sum, unless stages are explicitly modelled as running concurrently.",
+        )
         st.caption(
             "Working storage is temporary compute capacity (sort temp files, workflow work "
             "directories, container/cache space) and is not included in the durable Storage estimate."
         )
 
     # ---------------------------------------------------------------------
-    # 7. AWS execution architecture
+    # 8. Alternative execution options (spec 011a §15)
     # ---------------------------------------------------------------------
-    with st.container(border=True, key="section_compute_aws"):
-        theme.section_header(7, "AWS execution architecture")
-        theme.process_diagram(result.aws.architecture_steps, accent_indices={1})
-        st.markdown(
-            f"**Region:** {result.aws.region_name} (`{result.aws.region_code}`) — kept near the "
-            "project's currently modelled AWS storage; cross-region transfer/governance implications "
-            "are not modelled."
-        )
+    with st.container(border=True, key="section_compute_alternatives"):
+        theme.section_header(8, "Alternative execution options")
         st.caption(
-            f"AWS Batch orchestration fee: ${result.aws.batch_orchestration_fee_usd} — underlying EC2 "
-            "and storage resources are billed normally. Purchase model baseline: "
-            f"{result.aws.purchase_model} (Spot is a future/optional optimisation; no fixed discount "
-            "is assumed)."
-        )
-        theme.table(
-            columns=["Component", "Status"],
-            rows=[
-                ["Resource model", "Implemented"],
-                ["Runtime model", "Implemented"],
-                ["Working storage", "Implemented"],
-                ["AWS architecture", "Implemented"],
-                ["AWS price", result.aws.pricing_status],
-            ],
-            align=["left", "left"],
+            "These are not part of the selected open-source workflow and are not included in the "
+            "runtime or cost totals above."
         )
 
-    # ---------------------------------------------------------------------
-    # 8. Sentieon
-    # ---------------------------------------------------------------------
-    with st.container(border=True, key="section_compute_sentieon"):
-        theme.section_header(8, "Sentieon")
+        st.markdown("**Sentieon on HPC**")
         theme.callout(
             result.sentieon.status,
             f"US${result.sentieon.usd_per_genome}/genome × {result.sentieon.num_samples} samples = "
@@ -319,11 +400,41 @@ def render() -> None:
         )
         st.caption(f"{result.sentieon.evidence.label}: {result.sentieon.evidence.source}")
 
+        st.markdown("**DRAGEN / Illumina ICA**")
+        theme.callout(
+            bm.DRAGEN_ICA_STATUS,
+            "A future execution-provider/workflow alternative. Not costed in this iteration.",
+        )
+
     # ---------------------------------------------------------------------
-    # 9. Calculation basis & evidence
+    # 9. Workflow accuracy evidence (spec 011a §20-§23)
+    # ---------------------------------------------------------------------
+    with st.container(border=True, key="section_compute_accuracy"):
+        theme.section_header(9, "Workflow accuracy evidence")
+        st.caption(
+            "Variant-calling accuracy depends on the sample, sequencing technology, coverage, truth "
+            "set, reference and software configuration. Where possible, workflows should be "
+            "evaluated against an appropriate Genome in a Bottle truth set using a consistent "
+            "evaluation methodology. Figures below are evidence categories, not scores — no "
+            "workflow is ranked and no F1 comparison is made here."
+        )
+        theme.table(
+            columns=["Workflow", "Accuracy evidence category"],
+            rows=[
+                ["BWA-MEM2 + DeepVariant", "Published GIAB / hap.py accuracy metrics (DeepVariant)"],
+                ["BWA-MEM2 + GATK HaplotypeCaller", "GIAB / precisionFDA benchmark evidence"],
+                ["DRAGEN pipeline", "GIAB / precisionFDA benchmark evidence"],
+                ["Sentieon pipeline", "GIAB / precisionFDA benchmark evidence"],
+            ],
+            align=["left", "left"],
+        )
+
+    # ---------------------------------------------------------------------
+    # Calculation basis & evidence
     # ---------------------------------------------------------------------
     with st.expander("Calculation basis & evidence"):
         alignment_stage = next(s for s in result.stages if s.name == "BWA-MEM2 + sort")
+        cram_index_stage = next(s for s in result.stages if s.name == "CRAM index")
         deepvariant_stage = next(s for s in result.stages if s.name == "DeepVariant")
 
         _evidence_block("Alignment runtime", alignment_stage.evidence["runtime"])
@@ -337,6 +448,8 @@ def render() -> None:
         )
         st.caption(alignment_stage.evidence["memory"].notes)
         st.markdown("---")
+        _evidence_block("CRAM index runtime", cram_index_stage.evidence["runtime"])
+        st.markdown("---")
         _evidence_block("DeepVariant", deepvariant_stage.evidence["runtime"])
         st.markdown("---")
         _evidence_block("Scratch", result.working_storage.evidence)
@@ -345,34 +458,34 @@ def render() -> None:
     # 10. Explicit limitations
     # ---------------------------------------------------------------------
     with st.container(border=True, key="section_compute_limitations"):
-        theme.section_header(9, "Explicit limitations")
+        theme.section_header(10, "Explicit limitations")
         theme.callout("Read before using these figures", "<br>".join(f"{i + 1}. {item}" for i, item in enumerate(result.limitations)))
 
     # ---------------------------------------------------------------------
     # 11. Export
     # ---------------------------------------------------------------------
     with st.container(border=True, key="section_compute_export"):
-        theme.section_header(10, "Export")
+        theme.section_header(11, "Export")
         excol1, excol2, excol3 = st.columns(3)
-        file_stub = project.metadata.name.replace(" ", "_") + "_compute_estimate"
+        file_stub = project_name.replace(" ", "_") + "_compute_estimate"
         with excol1:
             st.download_button(
                 "Download CSV",
-                data=cost_export.compute_to_csv(project.metadata.name, num_samples, result),
+                data=cost_export.compute_to_csv(project_name, num_samples, result),
                 file_name=f"{file_stub}.csv",
                 mime="text/csv",
             )
         with excol2:
             st.download_button(
                 "Download JSON",
-                data=cost_export.compute_to_json(project.metadata.name, num_samples, result),
+                data=cost_export.compute_to_json(project_name, num_samples, result),
                 file_name=f"{file_stub}.json",
                 mime="application/json",
             )
         with excol3:
             st.download_button(
                 "Download Markdown summary",
-                data=cost_export.compute_to_markdown(project.metadata.name, num_samples, result),
+                data=cost_export.compute_to_markdown(project_name, num_samples, result),
                 file_name=f"{file_stub}.md",
                 mime="text/markdown",
             )

@@ -83,7 +83,8 @@ BWA_CPU_UTILISATION_EVIDENCE = Evidence(
     value=f"{BWA_CPU_CORE_HOURS:.1f} core-hours/sample",
     notes=(
         f"(user {BWA_USER_CPU_SECONDS}s + system {BWA_SYSTEM_CPU_SECONDS}s) / 3600 = "
-        f"{BWA_CPU_CORE_HOURS:.2f} core-hours. Not {BWA_ALLOCATED_CPU} x wall time (spec 011 §11)."
+        f"{BWA_CPU_CORE_HOURS:.2f} core-hours. Not {BWA_ALLOCATED_CPU} x wall time — allocated "
+        "CPU and measured CPU consumption are separate figures."
     ),
 )
 
@@ -121,6 +122,8 @@ CRAM_INDEX_MAX_RSS_KB = Decimal("28928")
 CRAM_INDEX_WALL_TIME_HOURS = CRAM_INDEX_ELAPSED_SECONDS / SECONDS_PER_HOUR
 CRAM_INDEX_PEAK_RAM_MIB = CRAM_INDEX_MAX_RSS_KB / KIB_PER_MIB
 
+CRAM_INDEX_RESOURCE_NOTE = "Lightweight / shared worker"
+
 CRAM_INDEX_RUNTIME_EVIDENCE = Evidence(
     classification="measured",
     source=f"{BWA_SAMPLE} samtools index benchmark",
@@ -128,8 +131,8 @@ CRAM_INDEX_RUNTIME_EVIDENCE = Evidence(
     value=f"{CRAM_INDEX_WALL_TIME_HOURS * 60:.1f} min/sample",
     notes=(
         f"Elapsed 15:08.66 ({CRAM_INDEX_ELAPSED_SECONDS}s) / 3600 = "
-        f"{CRAM_INDEX_WALL_TIME_HOURS:.4f} h. Lightweight downstream operation — "
-        "not modelled as requiring a dedicated 32-core worker (spec 011 §5)."
+        f"{CRAM_INDEX_WALL_TIME_HOURS:.4f} h. Measured and lightweight despite "
+        "requesting 32 threads — does not require a dedicated 32-core worker."
     ),
 )
 
@@ -159,7 +162,7 @@ DEEPVARIANT_RUNTIME_EVIDENCE = Evidence(
         f"postprocess_variants 6m45s = {DEEPVARIANT_TOTAL_SECONDS:.0f}s. DeepVariant's own "
         "documentation states this configuration is chosen for reproducibility/consistency, "
         "not necessarily the fastest or cheapest — this runtime is not a claim that an AWS "
-        "instance will reproduce it (spec 011 §8)."
+        "instance will reproduce it."
     ),
 )
 
@@ -181,7 +184,10 @@ SCRATCH_EVIDENCE = Evidence(
     source="Conservative initial planning value; no CBIO measured scratch benchmark yet",
     date=BWA_BENCHMARK_DATE,
     value=f"{DEFAULT_SCRATCH_GIB_PER_WORKER} GiB/worker",
-    notes="Editable planning assumption, not a measured BWA-MEM2 requirement (spec 011 §13).",
+    notes=(
+        "Editable planning assumption, not a measured BWA-MEM2 requirement. The same "
+        "per-worker figure is currently used for both alignment and DeepVariant workers."
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -193,11 +199,11 @@ SENTIEON_USD_PER_GENOME = Decimal("1.50")
 SENTIEON_EVIDENCE = Evidence(
     classification="local_commercial_assumption",
     source="UCT Sentieon licence planning rate",
-    date="Unconfirmed — see docs/design-and-assumptions.md §10.6",
+    date="Unconfirmed — see docs/design-and-assumptions.md",
     value=f"US${SENTIEON_USD_PER_GENOME}/genome",
     notes=(
         "Software licensing only; does not include compute, storage, transfer or "
-        "engineering. Sentieon runtime is not implemented without a benchmark (spec 011 §27)."
+        "engineering. Sentieon runtime is not implemented without a benchmark."
     ),
 )
 
@@ -216,3 +222,14 @@ AWS_ARCHITECTURE_STEPS = [
     "Amazon S3",
 ]
 AWS_PRICING_STATUS = "Pending verified regional pricing"
+
+# ---------------------------------------------------------------------------
+# Execution environment — Ilifu/HPC and future alternatives (spec 011a §5, §18)
+# ---------------------------------------------------------------------------
+
+HPC_STATUS = "Available planning reference"
+HPC_MONETARY_COST_STATUS = "Not currently modelled"
+HPC_WORKING_STORAGE_STATUS = "Planning model available"
+HPC_SCHEDULING_STATUS = "Not currently modelled"
+
+DRAGEN_ICA_STATUS = "Planned"

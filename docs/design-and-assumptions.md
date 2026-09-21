@@ -101,6 +101,30 @@ Project Summary) can read it without redefining or recomputing it. It
 performs no calculation of its own — see [§4 of spec
 010](../requests/010-application-architecture.md).
 
+### Application startup state (spec 011a)
+
+The application no longer opens with the 500-sample demo profile loaded as
+though it were the user's project. On first load it seeds a conservative
+**minimum-valid WGS 30x project** — 1 sample, 1-year retention, empty
+project name — using the same config-driven planning defaults (volumes,
+movement, engineering, currency) as the demo profile
+(`views/storage._minimum_valid_state()`). The full 500×30×/5-year example
+remains available via the explicit "Load 500 x 30x WGS / 5-year demo
+profile" button (`views/storage._default_state()` /
+`_load_demo_profile()`), used for demonstrations, screenshots and
+reproducing the documented regression figures below — it is never the
+application's silent starting state.
+
+A shared project bootstrap (`views/storage.ensure_project_state()`) runs
+once, before `st.navigation` dispatches to whichever page the user opens
+first (`app.py`). This guarantees `st.session_state["project"]` always
+holds a coherent project — Storage, Compute, Transfer and Project Summary
+share one project state regardless of navigation entry point. Previously,
+opening a non-Storage page directly in a fresh session could show a
+contradictory "no project configured" message, because `st.navigation` only
+executes the render function of the page actually displayed and Storage's
+own session-state seeding never ran.
+
 ### WGS 30x template
 
 A predefined planning profile for approximately 30x whole-genome
@@ -422,6 +446,26 @@ runtime, ICA/DRAGEN, Custom Project compute support, and Cost-efficient /
 Balanced / Fast scenarios remain **Planned** or **Under investigation** — see
 each subsection below.
 
+**Spec 011a refines this module** before Transfer (012) is started: the
+Compute page now separates **workflow** (what processing occurs, §10.1)
+from **execution environment** (where/how it runs — Ilifu/HPC and AWS,
+§10.8) as distinct concepts; CRAM indexing is corrected from an
+internally-contradictory "excluded as workflow overhead" treatment to an
+explicitly included, measured stage (§10.2); working storage became
+stage-specific (§10.5); the runtime total is relabelled a **sequential-stage
+planning estimate** with an explicit pipelining caveat (§10.9); Sentieon and
+DRAGEN/ICA are presented as alternative execution options, not part of the
+active workflow; and internal specification references (`spec 011 §n`) were
+removed from user-facing Compute page text — this document may continue to
+reference them.
+
+Four distinct planning questions run through Storage, Compute and (later)
+Transfer: what data must be stored (Storage), what processing must be
+performed (**workflow**), where/how that processing runs (**execution
+environment**), and how data moves between locations (Transfer). These
+remain distinct even where they interact, so the Compute page renders them
+as separate sections rather than one merged view.
+
 It should eventually support scenarios such as **Cost-efficient**,
 **Balanced** and **Fast** — without assuming a faster scenario necessarily
 costs proportionally more or less; such differences should be calculated
@@ -431,6 +475,13 @@ selection, utilisation, Spot/on-demand exposure, storage lifetime and
 price/performance.
 
 ### 10.1 Open-source 30x WGS reference workflow (Implemented)
+
+**Workflow** describes what processing occurs, independently of where it
+runs — kept as a distinct concept from **execution environment** (§10.8),
+which describes where/how the workflow executes (spec 011a §4). The
+workflow diagram on the Compute page annotates each processing stage as
+"modelled" or "benchmark pending" rather than leaving unquantified stages
+(GLnexus) unlabelled.
 
 Implemented as the Compute page's workflow (`views/compute.py`), scoped to
 the WGS 30x project profile only — Custom Project compute modelling remains
@@ -507,9 +558,16 @@ shown alongside the measured figure, never merged into it (spec 011 §6).
 **CRAM indexing** (`samtools index -@32 NA12878.cram`, measured): wall time
 15:08.66; user 170.09s; system 60.18s; average CPU utilisation 25%; max RSS
 28,928 KB. Treated as a lightweight downstream operation — not modelled as
-requiring a dedicated 32-core worker, and excluded from the Compute page's
-"known modelled elapsed time" total alongside other workflow overhead (spec
-011 §5, §18).
+requiring a dedicated 32-core worker. It shares the alignment stage's
+concurrency setting (a downstream step on the same worker, not an
+independently scheduled stage) and is **explicitly included** in the
+Compute page's runtime total (spec 011a §8-§9) — an earlier revision
+excluded it under an internally-contradictory "workflow overhead" label,
+even though the underlying figure is measured, not unmodelled overhead.
+Workflow overhead now means only queue delay, instance startup, retries,
+staging delay, orchestration overhead, interruptions and contention — none
+of which are currently modelled — and is stated separately from GLnexus,
+the total's one genuinely excluded stage.
 
 ### 10.3 DeepVariant benchmark — Published benchmark (Implemented)
 
@@ -552,15 +610,21 @@ needed while jobs execute — e.g. compressed FASTQs being processed,
 alignment/sorting temporaries, BAM/CRAM intermediates, DeepVariant working
 files, workflow work directories, container temporary data, cohort-calling
 temporaries. Implemented for V1 as a configurable planning assumption
-(`cbio_cost.compute.working_storage_result`):
+(`cbio_cost.compute.working_storage_result`), **stage-specific since spec
+011a §12**:
 
-    simultaneous working storage = scratch per worker x concurrent workers
+    alignment peak scratch    = scratch per worker x alignment concurrency
+    DeepVariant peak scratch  = scratch per worker x DeepVariant concurrency
+    peak workflow scratch     = max(alignment peak, DeepVariant peak)
 
 Default scratch/worker = 250 GiB, classified **Planning assumption** — not
-a measured BWA-MEM2 requirement, editable on the Compute page. Concurrent
-workers = `max(alignment concurrency, DeepVariant concurrency)`, a
-conservative upper bound reflecting the V1 sequential-stage model (§10.9).
-Storage cost must eventually account for both provisioned capacity *and*
+a measured BWA-MEM2 requirement, editable on the Compute page. The same
+per-worker figure is currently used for both stages, but each stage's peak
+is driven by its own concurrency setting; the two stage peaks are combined
+with `max(...)`, not summed, reflecting the V1 sequential-stage execution
+model (§10.9) — the two stages are not modelled as running concurrently, so
+their scratch requirements do not stack. Storage cost must eventually
+account for both provisioned capacity *and*
 lifetime — a fast, high-concurrency scenario may need substantially more
 simultaneous scratch but hold it for less time, so scratch cost does not
 scale directly with maximum capacity. Potential AWS implementations include
@@ -572,9 +636,12 @@ for refinement.
 
 ### 10.6 Sentieon — Planned, Local commercial assumption
 
-A commercial accelerated alternative for the future Compute module,
-surfaced (excluded from totals) on the Compute page. Current UCT planning
-licence rate:
+A commercial accelerated alternative for the future Compute module. Since
+spec 011a, presented under the Compute page's **"Alternative execution
+options"** section (alongside ICA/DRAGEN, §10.7) rather than inside the
+active open-source workflow, to avoid implying it is part of the selected
+pipeline — the underlying licence-cost calculation is unchanged and remains
+excluded from totals. Current UCT planning licence rate:
 
     US$1.50 per genome
 
@@ -613,7 +680,30 @@ pricing models may evolve, so this should eventually be
 configuration-driven and version/date-stamped rather than a permanent
 constant. ICA costing is **not** implemented as part of this document.
 
-### 10.8 Execution architecture — Implemented (recommendation), pricing Planned
+### 10.8 Execution environment — Ilifu/HPC and AWS (Implemented), pricing Planned
+
+**Execution environment** describes where/how the workflow (§10.1) runs —
+kept distinct from the workflow itself (spec 011a §4-§5). The Compute page
+represents two current options and two planned alternatives:
+
+- **Ilifu / institutional HPC** — status **"Available planning
+  reference"**. This is not merely the source of the BWA-MEM2 benchmark; it
+  is itself a first-class execution environment (spec 011a §18). Runtime
+  evidence is partially available (BWA-MEM2: Measured — CBIO/Ilifu;
+  DeepVariant: Published benchmark only; GLnexus: Under investigation).
+  Working storage has a planning model available (§10.5). Monetary cost and
+  scheduling (queue times, fair-share performance, internal institutional
+  charging) are **not currently modelled** — the Compute page states this
+  explicitly rather than implying HPC execution is free.
+- **AWS** — status **"Architecture model implemented; pricing pending"**,
+  detailed below.
+- **Sentieon on HPC** — **Planned** (§10.6).
+- **DRAGEN / Illumina ICA** — **Planned** (§10.7).
+
+A full execution-option comparison engine (cost/evidence/completion-time
+across all four) is intentionally **not** built yet (spec 011a §6) — only
+the underlying architecture and terminology need to distinguish these
+options correctly for V1.
 
 The planner does not assume Slurm is always the preferred execution
 environment. For V1 (spec 011 §20), the Compute page documents an initial
@@ -645,22 +735,50 @@ Implemented for V1 (`cbio_cost.compute.concurrency_result`, spec 011 §14):
 
 - **Worker-hours** — `samples × runtime per sample`
 - **Concurrency** — user-configurable, separately for alignment and
-  DeepVariant
+  DeepVariant (CRAM indexing shares alignment's concurrency)
 - **Idealised elapsed time** — `waves × runtime per sample`, where
   `waves = ceil(samples / concurrency)`
 
-The Compute page's "known modelled elapsed time" sums the alignment and
-DeepVariant idealised elapsed times, treating the two per-sample stages as
+The Compute page's **"Sequential-stage planning estimate"** (renamed from
+"known modelled elapsed time" in spec 011a §10, to avoid it reading as an
+unconditional completion prediction) sums the alignment, CRAM index and
+DeepVariant idealised elapsed times, treating these per-sample stages as
 fully sequential across the whole cohort — a defensible worst-case, not a
-pipelined estimate — and excludes GLnexus, CRAM indexing and workflow
-overhead (queue delay, instance startup, retries, staging, interruptions,
-contention), all clearly labelled (spec 011 §18; decision record §13).
+pipelined estimate. It excludes only GLnexus (no approved benchmark) and
+workflow overhead (queue delay, instance startup, retries, staging,
+interruptions, contention — none currently modelled), both stated
+separately and clearly labelled (spec 011 §18; spec 011a §9-§11; decision
+record §13). A real workflow may pipeline samples (e.g. sample 2's
+alignment proceeding while sample 1 moves to DeepVariant); pipelining is
+**not currently modelled**, and the Compute page states this explicitly —
+pipelining would only ever reduce, not increase, elapsed time relative to
+this estimate.
 
 **Still Planned**: Cost-efficient / Balanced / Fast scenario presets, and a
 user-selected target completion time used to derive required concurrency.
 Compute cost is not assumed identical between such scenarios — instance
 price/performance, scaling efficiency, storage lifetime, provisioning, Spot
 availability and other factors may cause differences.
+
+### 10.10 Workflow accuracy evidence — Planned (principles only, spec 011a §20-§23)
+
+The Compute page shows a small **"Workflow accuracy evidence"** information
+section — principles only, not a scoring or ranking system. Variant-calling
+accuracy depends on the truth set, sample, sequencing technology, coverage,
+reference, confident regions, software version, pipeline configuration and
+evaluation methodology, so a single number (e.g. "DeepVariant 99.9%") is
+misleading without stating all of these. BWA-MEM2 is an aligner, not a
+variant caller, and is never presented with an independent accuracy score —
+accuracy evidence always attaches to a complete or appropriately defined
+workflow (e.g. "BWA-MEM2 → DeepVariant", "DRAGEN pipeline"). Useful evidence
+categories: **Genome in a Bottle (GIAB) / hap.py** (preferred basis for
+truth-set evaluation), **DeepVariant's own published precision/recall/F1
+metrics**, **precisionFDA challenges** (independent benchmark context), and
+vendor benchmarks (must be labelled as vendor-published, not independent
+evidence). The Compute page does not assign a winner, rank workflows, or mix
+incompatible F1 scores into one comparison table. A controlled accuracy
+comparison across workflows may be added later once an appropriate common
+benchmark is identified.
 
 ---
 
@@ -745,8 +863,8 @@ storage resource if it is intentionally reused for multiple purposes.
 | BWA-MEM2 CPU consumption (NA12878) | ≈68.1 core-hours/sample | Measured — CBIO/Ilifu | (user+sys CPU time)/3600, not 32×wall time, §10.2 |
 | BWA-MEM2 peak RAM (NA12878) | ≈116.7 GiB | Measured — CBIO/Ilifu | Max RSS, §10.2 |
 | Alignment planning RAM allocation | 160 GiB | Planning assumption | Headroom over measured peak, §10.2 |
-| CRAM index runtime (NA12878) | ≈15.1 min/sample | Measured — CBIO/Ilifu | `samtools index -@32`, lightweight, §10.2 |
-| Scratch/worker (working storage) | 250 GiB/worker | Planning assumption | Editable; no CBIO measured benchmark yet, §10.5 |
+| CRAM index runtime (NA12878) | ≈15.1 min/sample | Measured — CBIO/Ilifu | `samtools index -@32`, lightweight, shares alignment concurrency, included in runtime total, §10.2 |
+| Scratch/worker (working storage) | 250 GiB/worker | Planning assumption | Editable; same figure used for both stages; peak = max(alignment peak, DeepVariant peak), §10.5 |
 | DeepVariant CPU runtime | ~1h09/sample on 96-vCPU/384-GiB reference config | Published benchmark | DeepVariant v1.10, §10.3 |
 | GLnexus cohort resources | TBD | — | Research/benchmark required, §10.4 |
 | Sentieon licence | US$1.50/genome (500 genomes = US$750 / R12,037.50) | Local commercial assumption | Current UCT planning rate, §10.6 |
@@ -779,8 +897,11 @@ Dated: 2026-09-15.
 | **Latency**: treat RTT as a feasibility/performance characteristic, not an arbitrary duration penalty | Bandwidth is the primary duration driver; latency affects whether that bandwidth is actually achievable, which is a different (BDP/TCP-tuning) concern |
 | **Evidence**: distinguish Measured, Published benchmark, Planning assumption and Local commercial assumption throughout | Prevents a rough planning number from being mistaken for a measured or authoritative one when budgeting real projects |
 | **Compute V1 scope** (spec 011): support only the WGS 30x project profile; Custom Project shows a guard message rather than a Compute result | The reference workflow, benchmark and sample-count assumptions are WGS-30x-specific; extending to arbitrary Custom Project datasets needs separate design |
-| **Compute V1 "known modelled elapsed time"**: sum the alignment and DeepVariant idealised elapsed times as if fully sequential across the whole cohort | A true pipelined estimate is workflow-overhead modelling that spec 011 explicitly defers; a labelled worst-case sum is defensible and transparent in the meantime |
-| **CRAM indexing and GLnexus excluded from Compute V1 totals** | CRAM indexing is measured as lightweight/negligible; GLnexus has no approved benchmark — showing either as included would misrepresent runtime |
+| **Compute "Sequential-stage planning estimate"** (spec 011a, renamed from "known modelled elapsed time"): sum the alignment, CRAM index and DeepVariant idealised elapsed times as if fully sequential across the whole cohort | A true pipelined estimate is workflow-overhead/scheduling modelling that spec 011/011a explicitly defer; a labelled worst-case sum is defensible and transparent in the meantime, and the label now avoids reading as an unconditional completion prediction |
+| **CRAM indexing included, GLnexus excluded, from Compute totals** (spec 011a, corrects spec 011) | CRAM indexing is measured and lightweight but is a real, measured contribution to elapsed time — excluding it under a "workflow overhead" label was internally contradictory, since workflow overhead is separately defined as unmodelled scheduling/staging effects; GLnexus still has no approved benchmark, so it remains excluded |
+| **Working storage is stage-specific** (spec 011a §12): `max(alignment peak, DeepVariant peak)`, each driven by its own concurrency, not a single shared-concurrency figure | The Compute page exposes two independent concurrency controls; a single `concurrent_workers = max(...)` scratch figure obscured which control actually drove the number shown |
+| **Workflow and execution environment are separate Compute page sections** (spec 011a §4-§5, §18): Ilifu/HPC is a first-class execution option, not merely the benchmark source | Conflating "what processing occurs" with "where it runs" made Sentieon/AWS read as workflow alternatives rather than execution-environment alternatives, and understated Ilifu/HPC as a real (if unpriced) execution option |
+| **Application starts with a minimum-valid project, not the 500-sample example** (spec 011a §2-§3) | The 500×30×/5-year demo silently presented as the user's real project on first load; a minimum-valid WGS project (1 sample, 1 year) plus an explicit "Load demo profile" action avoids that, and also gives every page a valid project to bootstrap from regardless of navigation entry point |
 | **No per-stage AWS instance-type mapping in Compute V1** | No verified af-south-1 EC2 pricing exists in the repository; CPU/RAM requirements are kept independent of any specific instance choice until pricing is confirmed (spec 011 §22-§23) |
 
 ---
@@ -805,6 +926,12 @@ Dated: 2026-09-15.
   research iGG separately from per-sample DRAGEN processing.
 - Extend Compute modelling to Custom Project mode.
 - Design and implement Cost-efficient / Balanced / Fast scenario presets.
+- Model workflow pipelining (overlapping alignment/DeepVariant across
+  samples) as an alternative to the sequential-stage planning estimate.
+- Identify a common benchmark suitable for a controlled workflow accuracy
+  comparison (§10.10) once one exists.
+- Research Ilifu/HPC cost allocation/charging so the execution environment
+  comparison (§10.8) can eventually include an HPC monetary cost figure.
 
 ### Transfer
 
@@ -847,9 +974,13 @@ until they have been evaluated.
 - The BWA-MEM2 benchmark behind Compute's alignment stage is one measured
   NA12878 execution on Ilifu hardware — not universal BWA-MEM2 performance,
   and AWS performance cannot be inferred exactly from Ilifu core counts.
-- Compute's "known modelled elapsed time" excludes GLnexus, CRAM indexing
-  and workflow overhead (queue delay, instance startup, retries, staging,
-  interruptions, contention) — see §10.9.
+- Compute's "Sequential-stage planning estimate" excludes GLnexus and
+  workflow overhead (queue delay, instance startup, retries, staging,
+  interruptions, contention); it assumes stages execute sequentially across
+  the cohort and does not model pipelining — see §10.9.
+- Compute's Ilifu/HPC execution environment has no monetary cost currently
+  modelled — this states that HPC cost allocation is unmodelled, not that
+  HPC execution is free — see §10.8.
 - Sensitive-data governance remains project/institution specific; the
   planner does not perform that assessment.
 - The planner does not constitute infrastructure, security, ethics,

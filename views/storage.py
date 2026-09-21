@@ -136,15 +136,105 @@ def _default_state() -> dict:
     return state
 
 
+def _minimum_valid_state() -> dict:
+    # Conservative minimum-valid WGS 30x project — the application's actual
+    # starting state (spec 011a §2). Keeps all config-driven planning
+    # defaults (volumes, movement, engineering, currency) from
+    # _default_state() and overrides only the project-identity fields that
+    # made the app look like a specific real 500-sample project on first
+    # load. The full 500x30x/5-year example remains available via the
+    # explicit "Load demo profile" button (_load_demo_profile() below).
+    state = _default_state()
+    state["project_name"] = ""
+    state["num_samples"] = 1
+    state["retention_years"] = 1.0
+    return state
+
+
 def _load_demo_profile() -> None:
     st.session_state.update(_default_state())
+
+
+def _wgs_datasets_from_session_state():
+    """(num_samples, volumes, wgs_movement, active_months, datasets,
+    headroom_fraction) for WGS 30x mode, read from current session-state
+    widget values. Shared by render()'s WGS branch and
+    _build_project_from_session_state() (spec 011a §3) so there is one
+    source of truth for how WGS datasets are derived from session state."""
+    num_samples = int(st.session_state["num_samples"])
+    volumes = {
+        file_type: FileTypeVolumeAssumption(
+            name=file_type,
+            gb_per_sample=_dec(st.session_state[f"vol_{file_type}"]),
+            archive_class=st.session_state[f"archive_{file_type}"],
+        )
+        for file_type in WGS_FILE_TYPES
+    }
+    wgs_movement = WgsMovementAssumptions(
+        fastq_passes=_dec(st.session_state["fastq_passes"]),
+        cram_retrieval_fraction=_dec(st.session_state["cram_retrieval_percent"]) / Decimal(100),
+        cram_retrieval_passes=_dec(st.session_state["cram_retrieval_passes"]),
+        gvcf_passes=_dec(st.session_state["gvcf_passes"]),
+    )
+    active_months = _dec(st.session_state["active_months"])
+    datasets = cost_config.build_wgs_datasets(num_samples, volumes, wgs_movement, active_months)
+    headroom_fraction = _dec(st.session_state["headroom_percent"]) / Decimal(100)
+    return num_samples, volumes, wgs_movement, active_months, datasets, headroom_fraction
+
+
+def _build_project_from_session_state() -> Project:
+    """Build the shared WGS 30x Project from current session-state values,
+    without requiring any widget to have been drawn (spec 011a §3). Used to
+    bootstrap session state before navigation dispatches to a page —
+    Streamlit widgets read their initial value from session state by key,
+    so this works even though no widget has executed yet this run."""
+    pricing = _load_pricing()
+    num_samples, _volumes, _wgs_movement, _active_months, datasets, headroom_fraction = (
+        _wgs_datasets_from_session_state()
+    )
+    transfer_contingency = _dec(st.session_state["transfer_contingency_percent"]) / Decimal(100)
+    inputs = ProjectInputs(
+        project_name=st.session_state["project_name"] or "Untitled project",
+        project_type="WGS 30x",
+        retention_years=_dec(st.session_state["retention_years"]),
+        transfer_contingency=transfer_contingency,
+        headroom_fraction=headroom_fraction,
+        num_samples=num_samples,
+    )
+    engineering = EngineeringAssumptions(
+        onboarding_hours=_dec(st.session_state["onboarding_hours"]),
+        operations_hours_per_year=_dec(st.session_state["operations_hours_per_year"]),
+        closeout_hours=_dec(st.session_state["closeout_hours"]),
+        hourly_rate_zar=_dec(st.session_state["hourly_rate_zar"]),
+    )
+    currency = CurrencyAssumptions(
+        usd_zar=_dec(st.session_state["usd_zar"]),
+        vat_fraction=_dec(st.session_state["vat_percent"]) / Decimal(100),
+    )
+    estimate = build_estimate(inputs, datasets, engineering, pricing, currency)
+    estimate.explanation = explain_result(estimate)
+    return Project.from_storage(inputs, datasets, estimate)
+
+
+def ensure_project_state() -> None:
+    """Guarantee a shared Project exists in session state before any page
+    renders, regardless of which page the user opens first (spec 011a §3).
+    Seeds minimum-valid WGS defaults (spec 011a §2) — never the 500-sample
+    example — so direct navigation to Compute/Transfer/Project Summary in a
+    fresh session sees a coherent, if minimal, project instead of a
+    contradictory "no project configured" state."""
+    if "loaded" not in st.session_state:
+        st.session_state.update(_minimum_valid_state())
+        st.session_state["loaded"] = True
+    if PROJECT_SESSION_KEY not in st.session_state:
+        st.session_state[PROJECT_SESSION_KEY] = _build_project_from_session_state()
 
 
 def render() -> None:
     _init_custom_datasets()
 
     if "loaded" not in st.session_state:
-        st.session_state.update(_default_state())
+        st.session_state.update(_minimum_valid_state())
         st.session_state["loaded"] = True
 
     st.caption(
@@ -415,7 +505,11 @@ def render() -> None:
     # ---------------------------------------------------------------------------
     with st.container(border=True, key="section_5"):
         theme.section_header(5, "Ilifu compute")
-        theme.callout("Compute cost not yet included", "Compute cost / entitlement not yet included.")
+        theme.callout(
+            "Compute infrastructure cost not yet included",
+            "Compute runtime and resource planning are available on the Compute page. "
+            "Compute infrastructure cost / entitlement is not yet included in this total.",
+        )
         st.caption(
             "Future versions should model project classes such as CBIO core, CBIO "
             "collaborative, external academic, and externally funded/service projects, "
@@ -443,24 +537,9 @@ def render() -> None:
     try:
         if is_wgs_mode:
             project_type = "WGS 30x"
-            num_samples = int(st.session_state["num_samples"])
-            volumes = {
-                file_type: FileTypeVolumeAssumption(
-                    name=file_type,
-                    gb_per_sample=_dec(st.session_state[f"vol_{file_type}"]),
-                    archive_class=st.session_state[f"archive_{file_type}"],
-                )
-                for file_type in WGS_FILE_TYPES
-            }
-            wgs_movement = WgsMovementAssumptions(
-                fastq_passes=_dec(st.session_state["fastq_passes"]),
-                cram_retrieval_fraction=_dec(st.session_state["cram_retrieval_percent"]) / Decimal(100),
-                cram_retrieval_passes=_dec(st.session_state["cram_retrieval_passes"]),
-                gvcf_passes=_dec(st.session_state["gvcf_passes"]),
+            num_samples, volumes, wgs_movement, active_months, datasets, headroom_fraction = (
+                _wgs_datasets_from_session_state()
             )
-            active_months = _dec(st.session_state["active_months"])
-            datasets = cost_config.build_wgs_datasets(num_samples, volumes, wgs_movement, active_months)
-            headroom_fraction = _dec(st.session_state["headroom_percent"]) / Decimal(100)
         else:
             project_type = "Custom Project"
             num_samples = None
@@ -552,7 +631,7 @@ def render() -> None:
         theme.headline(
             "Estimated infrastructure cost",
             f"R{estimate.grand_total_zar:,.0f}",
-            "Storage • Transfer • Archive • Engineering — compute not yet included",
+            "Storage • Transfer • Archive • Engineering — compute infrastructure cost not yet included",
         )
 
         st.markdown("**Dataset summary**")
@@ -579,7 +658,9 @@ def render() -> None:
         for item in estimate.line_items:
             table_rows.append([item.label, f"R{item.amount_zar:,.0f}", item.note])
             table_row_classes.append("gro-row-total" if item.label == TOTAL_LABEL else None)
-        table_rows.append(["Compute", "Not included", "Not included"])
+        table_rows.append(
+            ["Compute", "Not included", "Resource/runtime planning available on Compute page — cost not included"]
+        )
         table_row_classes.append(None)
 
         theme.table(
@@ -700,8 +781,9 @@ def render() -> None:
 
         st.caption(
             "Data volumes, workflow data movement, retention periods, exchange rate, VAT and "
-            "engineering effort are configurable planning assumptions. Compute costs are not "
-            "currently included."
+            "engineering effort are configurable planning assumptions. Compute runtime and "
+            "resource planning are available on the Compute page; compute infrastructure cost "
+            "is not yet included in this total."
         )
 
         acol1, acol2 = st.columns(2)

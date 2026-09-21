@@ -19,6 +19,13 @@ from views import compute, storage, summary, transfer
 st.set_page_config(page_title="CBIO Infrastructure Cost Planner", layout="wide")
 theme.header()
 
+# Guarantee a shared Project exists before navigation dispatches to whichever
+# page the user opens first (spec 011a §3) — st.navigation only runs the
+# render() of the selected page, so a fresh session opened directly at
+# Compute/Transfer/Project Summary would otherwise never see Storage's
+# session-state bootstrap.
+storage.ensure_project_state()
+
 pages = [
     st.Page(storage.render, title="Storage", url_path="storage", default=True),
     st.Page(compute.render, title="Compute", url_path="compute"),

@@ -22,6 +22,7 @@ from cbio_cost.compute_models import (
     ComputeResult,
     ComputeStage,
     ConcurrencyResult,
+    HpcExecutionInfo,
     SentieonInfo,
     WorkingStorageResult,
 )
@@ -57,7 +58,8 @@ def build_alignment_stage() -> ComputeStage:
 
 
 def build_cram_index_stage() -> ComputeStage:
-    """CRAM indexing — lightweight downstream operation (spec 011 §5)."""
+    """CRAM indexing — measured, lightweight, explicitly included stage
+    (spec 011a §8-§9)."""
     return ComputeStage(
         name="CRAM index",
         workflow_stage="Alignment",
@@ -70,7 +72,7 @@ def build_cram_index_stage() -> ComputeStage:
         software="samtools index",
         status="Implemented",
         evidence={"runtime": bm.CRAM_INDEX_RUNTIME_EVIDENCE},
-        included_in_total=False,
+        included_in_total=True,
     )
 
 
@@ -175,18 +177,36 @@ def _stage_concurrency(
 # ---------------------------------------------------------------------------
 
 
-def working_storage_result(scratch_per_worker_gib: Decimal, concurrent_workers: int) -> WorkingStorageResult:
-    """``simultaneous working storage = scratch per worker x concurrent workers``
-    (spec 011 §13)."""
+def working_storage_result(
+    scratch_per_worker_gib: Decimal,
+    alignment_concurrency: int,
+    deepvariant_concurrency: int,
+) -> WorkingStorageResult:
+    """Stage-specific working storage (spec 011a §12).
+
+    The same per-worker scratch assumption is used for both stages, but each
+    stage's peak scratch is driven by its own concurrency setting. Under the
+    sequential-stage execution model, peak workflow scratch is the max of
+    the two stage peaks, not their sum, unless the stages are explicitly
+    modelled as running concurrently.
+    """
     if scratch_per_worker_gib < 0:
         raise ValueError("scratch_per_worker_gib cannot be negative")
-    if concurrent_workers <= 0:
-        raise ValueError("concurrent_workers must be positive")
+    if alignment_concurrency <= 0:
+        raise ValueError("alignment_concurrency must be positive")
+    if deepvariant_concurrency <= 0:
+        raise ValueError("deepvariant_concurrency must be positive")
+
+    alignment_peak_gib = scratch_per_worker_gib * Decimal(alignment_concurrency)
+    deepvariant_peak_gib = scratch_per_worker_gib * Decimal(deepvariant_concurrency)
 
     return WorkingStorageResult(
         scratch_per_worker_gib=scratch_per_worker_gib,
-        concurrent_workers=concurrent_workers,
-        peak_simultaneous_gib=scratch_per_worker_gib * Decimal(concurrent_workers),
+        alignment_concurrency=alignment_concurrency,
+        deepvariant_concurrency=deepvariant_concurrency,
+        alignment_peak_gib=alignment_peak_gib,
+        deepvariant_peak_gib=deepvariant_peak_gib,
+        peak_simultaneous_gib=max(alignment_peak_gib, deepvariant_peak_gib),
         evidence=bm.SCRATCH_EVIDENCE,
     )
 
@@ -226,20 +246,49 @@ def aws_execution_info() -> AwsExecutionInfo:
 
 
 # ---------------------------------------------------------------------------
+# HPC execution environment (spec 011a §18)
+# ---------------------------------------------------------------------------
+
+
+def hpc_execution_info() -> HpcExecutionInfo:
+    return HpcExecutionInfo(
+        status=bm.HPC_STATUS,
+        alignment_runtime_evidence=bm.BWA_RUNTIME_EVIDENCE,
+        deepvariant_runtime_evidence=bm.DEEPVARIANT_RUNTIME_EVIDENCE,
+        glnexus_status=bm.GLNEXUS_STATUS,
+        monetary_cost_status=bm.HPC_MONETARY_COST_STATUS,
+        working_storage_status=bm.HPC_WORKING_STORAGE_STATUS,
+        scheduling_status=bm.HPC_SCHEDULING_STATUS,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Orchestration (spec 011 §10, §18)
 # ---------------------------------------------------------------------------
 
 LIMITATIONS: list[str] = [
     "The BWA-MEM2 benchmark is one measured NA12878 execution on Ilifu hardware.",
+    "The 160 GiB alignment RAM allocation is a planning assumption; measured peak was "
+    "approximately 116.7 GiB.",
     "Performance varies by sample, reference, software version, CPU architecture, "
     "storage and configuration.",
     "AWS performance cannot be inferred exactly from Ilifu core counts.",
     "DeepVariant numbers are published benchmarks from a different cloud/platform.",
-    "GLnexus is not yet included in total runtime.",
-    "Workflow overhead, failures, retries and queue delays are not yet modelled.",
+    "GLnexus is not yet quantitatively modelled.",
+    "Current elapsed time assumes sequential cohort-wide stages.",
+    "Workflow pipelining is not currently modelled.",
+    "Queue delay, retries, startup and staging overhead are not currently modelled.",
     "Working-storage defaults are planning assumptions until measured.",
+    "AWS compute pricing is not yet implemented.",
+    "HPC monetary cost is not currently modelled.",
+    "Accuracy varies by dataset, truth set and pipeline configuration.",
     "Cost estimates are infrastructure planning estimates, not procurement quotations.",
 ]
+
+UNMODELLED_OVERHEAD = (
+    "Workflow overhead — scheduler delay, instance startup, retries, staging delay, "
+    "orchestration overhead, interruptions and contention — is not currently modelled."
+)
 
 
 def build_compute_result(num_samples: int, config: ComputeConfig, usd_zar: Decimal) -> ComputeResult:
@@ -258,6 +307,17 @@ def build_compute_result(num_samples: int, config: ComputeConfig, usd_zar: Decim
         bm.BWA_RUNTIME_EVIDENCE,
         config.alignment_runtime_override_hours,
     )
+    # CRAM indexing shares the alignment stage's concurrency setting — it is
+    # a downstream step on the same worker, not an independently scheduled
+    # stage (spec 011a §8-§9).
+    cram_index = concurrency_result(
+        cram_index_stage.name,
+        num_samples,
+        config.alignment_concurrency,
+        bm.CRAM_INDEX_WALL_TIME_HOURS,
+        bm.CRAM_INDEX_RUNTIME_EVIDENCE,
+        "benchmark",
+    )
     deepvariant = _stage_concurrency(
         deepvariant_stage.name,
         num_samples,
@@ -267,26 +327,34 @@ def build_compute_result(num_samples: int, config: ComputeConfig, usd_zar: Decim
         config.deepvariant_runtime_override_hours,
     )
 
-    # V1 design decision (spec 011 §18): treat the two per-sample stages as
-    # fully sequential across the whole cohort — a defensible worst-case, not
-    # a pipelined estimate. CRAM indexing (lightweight) and GLnexus (no
-    # approved benchmark) are excluded from this total.
-    known_modelled_elapsed_hours = alignment.idealised_elapsed_hours + deepvariant.idealised_elapsed_hours
+    # V1 design decision (spec 011 §18): treat the per-sample stages as fully
+    # sequential across the whole cohort — a defensible worst-case, not a
+    # pipelined estimate. Only GLnexus (no approved benchmark) is excluded
+    # from this total; CRAM indexing is measured and included (spec 011a §9).
+    known_modelled_elapsed_hours = (
+        alignment.idealised_elapsed_hours
+        + cram_index.idealised_elapsed_hours
+        + deepvariant.idealised_elapsed_hours
+    )
 
     working_storage = working_storage_result(
         config.scratch_gib_per_worker,
-        max(config.alignment_concurrency, config.deepvariant_concurrency),
+        config.alignment_concurrency,
+        config.deepvariant_concurrency,
     )
 
     return ComputeResult(
         stages=[alignment_stage, cram_index_stage, deepvariant_stage, glnexus_stage],
         alignment=alignment,
+        cram_index=cram_index,
         deepvariant=deepvariant,
         glnexus=glnexus_stage,
         working_storage=working_storage,
         known_modelled_elapsed_hours=known_modelled_elapsed_hours,
-        excluded_stages=["GLnexus (cohort joint calling)", "CRAM index (folded into workflow overhead)"],
+        excluded_stages=["GLnexus (cohort joint calling)"],
+        unmodelled_overhead=UNMODELLED_OVERHEAD,
         aws=aws_execution_info(),
+        hpc=hpc_execution_info(),
         sentieon=sentieon_info(num_samples, usd_zar),
         limitations=list(LIMITATIONS),
     )

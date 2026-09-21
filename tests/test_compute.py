@@ -47,11 +47,14 @@ def test_concurrency_50_workers():
     assert result.idealised_elapsed_hours == Decimal("49.45")
 
 
-# 4. Scratch (spec 011 §13, §32) ---------------------------------------------
+# 4. Scratch — stage-specific peak (spec 011a §12, §28) ----------------------
 
 
-def test_scratch_working_storage():
-    result = working_storage_result(Decimal(250), 20)
+def test_scratch_working_storage_stage_specific_peak():
+    result = working_storage_result(Decimal(250), alignment_concurrency=10, deepvariant_concurrency=20)
+    assert result.alignment_peak_gib == Decimal(2500)
+    assert result.deepvariant_peak_gib == Decimal(5000)
+    # max(2500, 5000), not their sum (7500), under the sequential-stage model.
     assert result.peak_simultaneous_gib == Decimal(5000)
 
 
@@ -83,7 +86,7 @@ def test_bwa_derived_values_traceable():
     assert bm.BWA_WALL_TIME_HOURS == Decimal("4.945")
 
 
-# 7. GLnexus excluded (spec 011 §9, §18) -------------------------------------
+# 7. GLnexus excluded, CRAM index included (spec 011 §9; spec 011a §8-§9) ----
 
 
 def test_glnexus_excluded_from_total():
@@ -92,8 +95,28 @@ def test_glnexus_excluded_from_total():
 
     assert result.glnexus.included_in_total is False
     assert result.glnexus.runtime_hours is None
-    expected = result.alignment.idealised_elapsed_hours + result.deepvariant.idealised_elapsed_hours
+    assert result.excluded_stages == ["GLnexus (cohort joint calling)"]
+
+
+def test_cram_index_included_in_total():
+    config = ComputeConfig(alignment_concurrency=10, deepvariant_concurrency=10, scratch_gib_per_worker=Decimal(250))
+    result = build_compute_result(500, config, Decimal("16.05"))
+
+    cram_index_stage = next(s for s in result.stages if s.name == "CRAM index")
+    assert cram_index_stage.included_in_total is True
+    # CRAM index shares the alignment stage's concurrency.
+    assert result.cram_index.concurrency == config.alignment_concurrency
+
+    expected = (
+        result.alignment.idealised_elapsed_hours
+        + result.cram_index.idealised_elapsed_hours
+        + result.deepvariant.idealised_elapsed_hours
+    )
     assert result.known_modelled_elapsed_hours == expected
+    # Not just alignment + DeepVariant — CRAM index must actually contribute.
+    assert result.known_modelled_elapsed_hours != (
+        result.alignment.idealised_elapsed_hours + result.deepvariant.idealised_elapsed_hours
+    )
 
 
 # 8. Runtime override (spec 011 §17) -----------------------------------------
@@ -117,5 +140,8 @@ def test_alignment_runtime_override_basis():
 
 
 # Existing regression (spec 011 §32) -----------------------------------------
-# tests/test_calculator.py, tests/test_project.py and tests/test_app_smoke.py
-# are unmodified and must continue to pass unchanged (see plan verification).
+# tests/test_calculator.py's 500x30x regression builds inputs from the YAML
+# profile directly (not Streamlit session state), so it is unaffected by the
+# spec 011a §2 default-project-state change. See tests/test_project.py for
+# the minimum-valid-project-state and session-state-bootstrap tests (spec
+# 011a §2-§3).

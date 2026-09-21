@@ -52,10 +52,14 @@ class ConcurrencyResult:
 
 @dataclass
 class WorkingStorageResult:
-    """Simultaneous working/scratch storage requirement (spec 011 §13)."""
+    """Simultaneous working/scratch storage requirement (spec 011 §13; stage-
+    specific peak logic refined in spec 011a §12)."""
 
     scratch_per_worker_gib: Decimal
-    concurrent_workers: int
+    alignment_concurrency: int
+    deepvariant_concurrency: int
+    alignment_peak_gib: Decimal
+    deepvariant_peak_gib: Decimal
     peak_simultaneous_gib: Decimal
     evidence: Evidence
 
@@ -86,6 +90,20 @@ class AwsExecutionInfo:
     purchase_model: str
     pricing_status: str
     ec2_pricing: EC2InstancePricing | None = None
+
+
+@dataclass
+class HpcExecutionInfo:
+    """Ilifu/institutional HPC as an execution environment in its own right,
+    not merely the source of the BWA-MEM2 benchmark (spec 011a §18)."""
+
+    status: str
+    alignment_runtime_evidence: Evidence
+    deepvariant_runtime_evidence: Evidence
+    glnexus_status: str
+    monetary_cost_status: str
+    working_storage_status: str
+    scheduling_status: str
 
 
 @dataclass
@@ -122,15 +140,19 @@ class ComputeConfig:
 
 @dataclass
 class ComputeResult:
-    """Full Compute planning result for one project (spec 011 §10, §18-§19)."""
+    """Full Compute planning result for one project (spec 011 §10, §18-§19;
+    CRAM-index inclusion and HPC execution info added in spec 011a)."""
 
     stages: list[ComputeStage]
     alignment: ConcurrencyResult
+    cram_index: ConcurrencyResult
     deepvariant: ConcurrencyResult
     glnexus: ComputeStage
     working_storage: WorkingStorageResult
     known_modelled_elapsed_hours: Decimal
     excluded_stages: list[str]
+    unmodelled_overhead: str
     aws: AwsExecutionInfo
+    hpc: HpcExecutionInfo
     sentieon: SentieonInfo
     limitations: list[str]

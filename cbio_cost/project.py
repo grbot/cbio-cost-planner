@@ -8,8 +8,9 @@ independently re-asking for the same project information.
 
 This is deliberately minimal: it wraps the existing ``ProjectInputs``/
 ``Dataset``/``CostEstimate`` types from ``cbio_cost.models`` rather than
-introducing a parallel representation. Compute and Transfer configuration
-are not modelled yet — they are reserved extension points for later specs.
+introducing a parallel representation. Compute configuration/results are
+modelled (spec 011/011a, via ``compute_config``/``compute_result`` below);
+Transfer remains a reserved extension point for a later spec.
 """
 
 from __future__ import annotations
@@ -38,9 +39,9 @@ class Project:
     """One genomics project shared across Storage, Compute and Transfer.
 
     ``storage_estimate`` is populated once the Storage module has computed a
-    result; it is ``None`` until then. Compute/Transfer configuration and
-    results are future extension points (spec 010 §4) and are not modelled
-    here yet.
+    result; it is ``None`` until then. ``compute_config``/``compute_result``
+    are populated once the Compute module has run (spec 011/011a); ``None``
+    until then. Transfer remains a future extension point (spec 010 §4).
     """
 
     metadata: ProjectMetadata

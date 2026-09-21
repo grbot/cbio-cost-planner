@@ -410,6 +410,14 @@ tr.gro-row-emphasis td {{
     border-color: {TEAL};
     color: {TEAL};
 }}
+.gro-diagram-box-subtitle {{
+    display: block;
+    margin-top: 0.2rem;
+    color: {MUTED};
+    font-weight: 400;
+    font-size: 0.7rem;
+    text-transform: none;
+}}
 .gro-diagram-arrow {{
     color: {TEAL};
     font-size: 1.3rem;
@@ -595,11 +603,18 @@ def disclaimer(headline_text: str, body: str) -> None:
     )
 
 
-def process_diagram(steps: list[str], accent_indices: set[int] | None = None) -> None:
+def process_diagram(
+    steps: list[str],
+    accent_indices: set[int] | None = None,
+    subtitles: list[str | None] | None = None,
+) -> None:
     """Render a simple box-and-arrow process/lifecycle diagram (spec: architecture diagrams).
 
     ``accent_indices`` marks which boxes (0-indexed) render in teal instead of
-    navy — used for the important transition/action step.
+    navy — used for the important transition/action step. ``subtitles``,
+    when given, is parallel to ``steps``: a small caption line rendered under
+    a box's label wherever the corresponding entry is not ``None`` (spec 011a
+    §14 — distinguishing modelled from not-yet-quantified workflow stages).
     """
     accent_indices = accent_indices or set()
     parts: list[str] = ['<div class="gro-diagram">']
@@ -607,7 +622,9 @@ def process_diagram(steps: list[str], accent_indices: set[int] | None = None) ->
         if i > 0:
             parts.append('<span class="gro-diagram-arrow">&rarr;</span>')
         css_class = "gro-diagram-box gro-diagram-box--teal" if i in accent_indices else "gro-diagram-box"
-        parts.append(f'<div class="{css_class}">{step}</div>')
+        subtitle = subtitles[i] if subtitles is not None else None
+        subtitle_html = f'<span class="gro-diagram-box-subtitle">{subtitle}</span>' if subtitle else ""
+        parts.append(f'<div class="{css_class}">{step}{subtitle_html}</div>')
     parts.append("</div>")
     st.markdown("".join(parts), unsafe_allow_html=True)
 

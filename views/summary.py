@@ -76,10 +76,15 @@ def render() -> None:
             compute = project.compute_result
             st.markdown("**Compute**")
             st.markdown(
-                "Workflow: FASTQ -> BWA-MEM2 -> CRAM -> DeepVariant -> gVCF -> GLnexus (excluded)"
+                "Workflow: FASTQ -> BWA-MEM2 -> CRAM index -> DeepVariant -> gVCF -> GLnexus "
+                "(not yet quantified)"
+            )
+            st.caption(
+                "Execution environment: Ilifu/HPC (reference — no monetary cost modelled) and "
+                "AWS (architecture defined, pricing pending)."
             )
             ccol1, ccol2, ccol3 = st.columns(3)
-            ccol1.metric("Known modelled runtime", f"{compute.known_modelled_elapsed_hours:,.1f} h")
+            ccol1.metric("Sequential-stage planning estimate", f"{compute.known_modelled_elapsed_hours:,.1f} h")
             ccol2.metric(
                 "Concurrency (align/DV)",
                 f"{compute.alignment.concurrency} / {compute.deepvariant.concurrency}",
@@ -88,8 +93,9 @@ def render() -> None:
                 "Peak working storage", f"{compute.working_storage.peak_simultaneous_gib:,.0f} GiB"
             )
             st.caption(
-                "Evidence status: Measured (alignment) + Published benchmark (DeepVariant) + "
-                "Planning assumptions (RAM, scratch) — GLnexus excluded, no approved benchmark."
+                "Evidence status: Measured (alignment, CRAM index) + Published benchmark "
+                "(DeepVariant) + Planning assumptions (RAM, scratch) — GLnexus excluded, no "
+                "approved benchmark."
             )
             theme.callout("Compute cost — not yet calculated", "AWS compute pricing is pending verified regional pricing (see Compute page).")
         else:

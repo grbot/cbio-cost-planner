@@ -1,4 +1,5 @@
-"""Tests for the shared project model (spec 010 §4)."""
+"""Tests for the shared project model (spec 010 §4) and the session-state
+bootstrap that fixes direct navigation to a non-Storage page (spec 011a §2-§3)."""
 
 from __future__ import annotations
 
@@ -6,10 +7,12 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import streamlit as st
 
 from cbio_cost.calculator import build_estimate
 from cbio_cost.config import build_wgs_datasets, load_currency_defaults, load_pricing, load_profiles
-from cbio_cost.project import Project, ProjectMetadata
+from cbio_cost.project import PROJECT_SESSION_KEY, Project, ProjectMetadata
+from views import storage
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
@@ -66,3 +69,53 @@ def test_project_metadata_custom_project_has_no_sample_count():
         name="Custom", project_type="Custom Project", num_samples=None, retention_years=Decimal(2)
     )
     assert metadata.num_samples is None
+
+
+# ---------------------------------------------------------------------------
+# Session-state bootstrap (spec 011a §2, §3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_session_state():
+    st.session_state.clear()
+    yield
+    st.session_state.clear()
+
+
+def test_minimum_valid_state_is_not_the_500_sample_example():
+    state = storage._minimum_valid_state()
+    assert state["num_samples"] == 1
+    assert state["retention_years"] == 1.0
+    assert state["project_name"] == ""
+
+
+def test_default_state_used_by_demo_profile_button_is_unchanged():
+    """The explicit "Load 500 x 30x WGS / 5-year demo profile" button still
+    loads the full example — only the app's initial state changed."""
+    state = storage._default_state()
+    assert state["num_samples"] == 500
+    assert state["retention_years"] == 5.0
+    assert state["project_name"] == "Example WGS Project"
+
+
+def test_ensure_project_state_populates_minimum_valid_project_without_any_widget():
+    """Simulates app.py's bootstrap call before st.navigation dispatches to a
+    page — proving a fresh session opened directly at /compute (or any
+    non-Storage page) sees a coherent WGS 30x project instead of the
+    "WGS 30x project required" contradiction the bug produced."""
+    storage.ensure_project_state()
+
+    project = st.session_state[PROJECT_SESSION_KEY]
+    assert project.metadata.project_type == "WGS 30x"
+    assert project.metadata.num_samples == 1
+    assert project.storage_estimate is not None
+
+
+def test_ensure_project_state_is_idempotent():
+    storage.ensure_project_state()
+    first = st.session_state[PROJECT_SESSION_KEY]
+
+    storage.ensure_project_state()
+
+    assert st.session_state[PROJECT_SESSION_KEY] is first
