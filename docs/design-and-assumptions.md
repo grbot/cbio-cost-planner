@@ -42,13 +42,15 @@ stages. The long-term intent is for all modules to operate over one shared
 project/dataset model so the planner produces one coherent project
 infrastructure estimate.
 
-**Status: Storage is Implemented. The Storage / Compute / Transfer /
-Project Summary application navigation and module shell are Implemented
-(`app.py`, `views/`) — Compute and Transfer calculations themselves, and a
-full cross-module Project Summary rollup, remain Planned.** Everything
-under [§10](#10-compute-planned) onward in this document describes
-planned design direction, not current behaviour, unless explicitly marked
-otherwise.
+**Status: Storage, Compute (WGS 30x scope) and Transfer are Implemented.**
+The Storage / Compute / Transfer / Project Summary application navigation
+and module shell are Implemented (`app.py`, `views/`); Project Summary
+shows what each module has actually computed (§9) rather than a fully
+combined cross-module total. See §10 and §11 for exactly what is/isn't
+implemented within Compute and Transfer respectively — several items
+within each (e.g. AWS compute/transfer pricing verification, GLnexus,
+Sentieon/ICA costing, transfer staging storage) remain Planned or Under
+investigation.
 
 ---
 
@@ -81,6 +83,12 @@ provenance:
 - **Local commercial assumption** — a price or commercial term available
   locally to UCT/CBIO that may not represent public or generally
   available pricing.
+- **Planning scenario** (spec 012) — one of several illustrative
+  throughput/duration figures shown when no measured or known-capacity
+  value exists; never presented as expected or measured.
+- **Published/provider pricing** (spec 012) — a cloud/network provider's
+  published tariff (e.g. AWS egress), distinct from Published benchmark
+  (software/hardware performance) above.
 
 ---
 
@@ -423,12 +431,18 @@ inventing data.
 The detailed Cost Summary panel (dataset totals, cost breakdown,
 sensitivity table, plain-English explanation, calculation-detail trace)
 remains on the Storage page itself. Since spec 011, Project Summary also
-shows a Compute section (workflow, known modelled runtime, concurrency,
-working storage, evidence status) once the Compute page has been visited in
-the session — Compute cost itself is shown as **"not yet calculated"**,
-never `$0`, because AWS compute pricing remains unverified (§10.8). **A full
-cross-module rollup that also incorporates Transfer results is Planned**,
-pending that module below.
+shows a Compute section (workflow, sequential-stage planning estimate,
+configured/effective worker concurrency, working storage, evidence status)
+once the Compute page has been visited in the session — Compute cost itself
+is shown as **"not yet calculated"**, never `$0`, because AWS compute
+pricing remains unverified (§10.8). Since spec 012, Project Summary
+similarly shows a Transfer section (dataset, source → destination, volume,
+throughput basis, estimated duration or planning scenarios, method,
+provider-cost status) once the Transfer page has been visited — its figures
+are never folded into Storage's `grand_total_zar` or any other combined
+total (§11), matching how Compute cost is handled. **A single combined
+figure across all three modules remains intentionally not built** until
+cost ownership across Storage/Compute/Transfer is made fully explicit.
 
 ---
 
@@ -782,58 +796,103 @@ benchmark is identified.
 
 ---
 
-## 11. Transfer (Planned)
+## 11. Transfer (Implemented)
 
-**Nothing in this section is implemented** beyond the current
-storage-module egress cost described in §5 (which only prices AWS
-internet egress volume/cost — it does not model transfer duration,
-method, or endpoint choice). Conceptual model:
+**Spec 012 implements the first functional Transfer module** —
+endpoint-to-endpoint data-movement planning, distinct from (and never
+double-counted with) the Storage module's own AWS-egress-cost assumption
+described in §5. Conceptual model, implemented in `cbio_cost/transfer_plan.py`
+/ `cbio_cost/transfer_plan_models.py`:
 
-    Endpoints → Dataset → Network → Transfer method → Duration + cost + practical recommendation
+    Endpoints → Dataset → Network → Transfer method → Duration + cost
 
-Potential endpoints: institutional/local HPC, Ilifu, AWS S3, Illumina
-ICA, other object storage, custom endpoint. Potential transfer methods:
-S3 multipart transfer, AWS CLI, rclone, Globus, institutional DTN, ICA
-transfer mechanism, other/custom. Transfer method does not automatically
-change pricing unless the selected endpoint/service actually has a
-relevant charge.
+**Storage's existing egress assumption vs. the Transfer module** — these
+answer different questions and are deliberately kept separate:
 
-### 11.1 Bandwidth modelling principles — Planned
+| | Existing Storage egress model (`cbio_cost/transfer.py`) | Transfer module (`cbio_cost/transfer_plan.py`) |
+|---|---|---|
+| Question answered | How much AWS-to-Ilifu workflow egress does the selected retrieval/passes behaviour imply, and what does it cost? | How long will moving a specific dataset between two named endpoints take, and what provider cost applies? |
+| Scope | One fixed direction (S3 → Ilifu workflow reads), folded into the Storage cost total | Any endpoint pair, explicit direction, one plan at a time |
+| Cost ownership | Included in Storage's `grand_total_zar` | Never folded into any total (Project Summary shows it separately) |
 
-The planner must not infer sustained network bandwidth merely from two
+Neither module imports from the other; they share only the same underlying
+AWS egress pricing configuration (`config/aws-pricing.yaml`), reused by the
+Transfer module via `cbio_cost.storage.tiered_cost` rather than a second
+pricing source. Migrating Storage's egress assumption *into* Transfer is a
+possible future direction but was explicitly not done in spec 012.
+
+Endpoint types (`ENDPOINT_TYPES`): institutional/local storage, Ilifu/HPC,
+AWS S3, Illumina ICA, other object storage, custom (user-named). Transfer
+methods (`TRANSFER_METHODS`, descriptive only in V1 — selecting one does
+not change the calculated throughput): Globus, AWS CLI/S3 multipart,
+rclone, institutional DTN, ICA transfer mechanism, other, not yet selected.
+
+Dataset volume is derived directly from the shared `Project.datasets` list
+that Storage already computed (`cbio_cost.transfer_plan.dataset_presets`) —
+the raw per-dataset size, not the headroom-inflated provisioned envelope —
+so WGS and Custom Project modes share one source of truth with no
+duplicated per-sample-volume logic, and Storage headroom is never silently
+added to a transfer estimate.
+
+### 11.1 Bandwidth modelling principles (Implemented)
+
+The planner does not infer sustained network bandwidth merely from two
 geographic locations. Physical distance can inform expected latency but
 does not reliably determine achievable throughput — routing,
 institutional networking, peering, firewall behaviour, congestion, DTNs,
-TCP tuning and endpoint performance all matter. The planned Transfer
-module should support three bandwidth modes:
+TCP tuning and endpoint performance all matter. The Transfer module
+supports three throughput modes (`cbio_cost.transfer_plan.throughput_result`):
 
 - **Measured throughput** — preferred, where an actual source-to-
-  destination transfer measurement is available.
+  destination transfer measurement is available. Classified **Measured**,
+  never conflated with a speed-test result.
 - **Known link capacity** — known network capacity with a configurable
-  planning efficiency.
-- **Unknown bandwidth** — do not invent a value; instead show scenarios
-  such as 100 Mbps, 500 Mbps, 1 Gbps, 5 Gbps, 10 Gbps.
+  planning-efficiency assumption (default 70%, editable, always classified
+  **Planning assumption** — 100% efficiency is never assumed silently).
+- **Unknown bandwidth** — no value is invented; a planning-scenario table
+  shows estimated duration at 100 Mbps, 500 Mbps, 1 Gbps, 5 Gbps and 10
+  Gbps, each classified **Planning scenario**. No throughput in that table
+  is recommended.
 
-The project's `1 TB = 1024 GB` storage-unit convention is preserved
-throughout; network Mbps/Gbps follow normal decimal network-rate
-definitions (these are deliberately different unit systems).
+The transfer-time formula (`cbio_cost.transfer_plan.transfer_duration_seconds`):
 
-### 11.2 Latency/RTT principles — Planned
+    seconds = size_GB × 1024³ × 8 / (throughput_Mbps × 10⁶)
 
-Round-trip latency is an optional secondary characteristic. Bandwidth
+The project's `1 TB = 1024 GB` storage-unit convention (`cbio_cost.units`)
+is preserved for dataset size throughout; network Mbps/Gbps follow normal
+decimal network-rate definitions (`1 Mbps = 1,000,000 bits/second`) — these
+are deliberately different unit systems and are never mixed silently.
+
+**Implementation note on the worked example in spec 012 §12**: 1 TB at
+1000 Mbps gives ≈2.44 h via the formula above, matching the spec text
+exactly. The same formula at 700 Mbps (1000 Mbps × 70% efficiency) gives
+≈3.49 h — the spec text's "≈3.41 h" for that case does not match its own
+formula (duration scales as 1/throughput: 2.44h × 1000/700 ≈ 3.49h). The
+implementation and its tests (`tests/test_transfer_plan.py`) derive both
+figures from the formula rather than hard-coding either number, per the
+spec's own instruction to do so.
+
+### 11.2 Latency/RTT principles (Implemented)
+
+Round-trip latency is an optional, secondary, advanced field. Bandwidth
 remains the primary input for transfer-duration estimation; latency
 influences whether available bandwidth can actually be utilised,
 particularly over high-bandwidth long-distance TCP paths. If RTT is
-supplied, a future planner may calculate the bandwidth-delay product
-(`BDP = bandwidth × RTT`) to support recommendations on TCP window
-requirements, parallel streams, multipart transfer, Globus, DTNs and
-resumable transfers. No arbitrary latency penalty is applied directly to
-the transfer-duration formula:
+supplied, the planner calculates the bandwidth-delay product
+(`cbio_cost.transfer_plan.bandwidth_delay_product_bytes`):
 
-    dataset size + planning throughput → estimated duration
-    bandwidth + RTT + transfer method → transfer feasibility/advice
+    BDP_bytes = throughput_bits_per_second × RTT_seconds / 8
 
-RTT remains optional if unknown.
+For example, 10 Gbps at 180 ms RTT gives exactly 225,000,000 bytes (225
+MB) of data in flight — pure decimal-network-unit arithmetic, no binary
+GB/TB conversion involved. BDP is presented as informational only: **not
+additional project storage**, and it never feeds back into the duration
+calculation:
+
+    dataset size + planning throughput → estimated duration   (unaffected by RTT)
+    bandwidth + RTT → bandwidth-delay product                  (informational only)
+
+RTT remains optional if unknown; no arbitrary latency penalty is applied.
 
 ### 11.3 Transfer staging storage — Planned
 
@@ -875,7 +934,9 @@ storage resource if it is intentionally reused for multiple purposes.
 | VAT | 15% | Planning assumption | Applied to AWS costs only |
 | Engineering hourly rate | R1,000/hour | Planning assumption | Explicitly not an approved institutional rate |
 | ICA/DRAGEN pricing | Under investigation | Published/commercial (pending) | Verify before implementation, §10.7 |
-| Transfer bandwidth | Not yet implemented | Planning input (future) | Must not be inferred from geography, §11.1 |
+| Transfer default planning efficiency | 70% | Planning assumption | Editable; applications rarely sustain theoretical line rate, §11.1 |
+| Transfer unknown-throughput scenarios | 100/500/1000/5000/10000 Mbps | Planning scenario | None recommended; shown when throughput is not known, §11.1 |
+| AWS egress pricing reused for Transfer provider cost | Config-driven (`config/aws-pricing.yaml`), same as Storage | Published/provider pricing (per-rate: UNVERIFIED) | AWS S3 → non-AWS only; AWS ingress modelled as $0; all other endpoint pairs "Not currently calculated", §11 |
 
 ---
 
@@ -903,6 +964,9 @@ Dated: 2026-09-15.
 | **Workflow and execution environment are separate Compute page sections** (spec 011a §4-§5, §18): Ilifu/HPC is a first-class execution option, not merely the benchmark source | Conflating "what processing occurs" with "where it runs" made Sentieon/AWS read as workflow alternatives rather than execution-environment alternatives, and understated Ilifu/HPC as a real (if unpriced) execution option |
 | **Application starts with a minimum-valid project, not the 500-sample example** (spec 011a §2-§3) | The 500×30×/5-year demo silently presented as the user's real project on first load; a minimum-valid WGS project (1 sample, 1 year) plus an explicit "Load demo profile" action avoids that, and also gives every page a valid project to bootstrap from regardless of navigation entry point |
 | **No per-stage AWS instance-type mapping in Compute V1** | No verified af-south-1 EC2 pricing exists in the repository; CPU/RAM requirements are kept independent of any specific instance choice until pricing is confirmed (spec 011 §22-§23) |
+| **Transfer's engine module is named `cbio_cost/transfer_plan.py`, not `cbio_cost/transfer.py`** (spec 012) | `cbio_cost/transfer.py` already existed as Storage's own AWS-egress-cost engine (spec 006 §6-§8), used by `cbio_cost/calculator.py`; reusing that name for the new endpoint-to-endpoint movement planner would have shadowed a load-bearing module. The two never import from each other |
+| **Transfer provider cost reuses `cbio_cost.storage.tiered_cost` and `config/aws-pricing.yaml`'s egress tiers directly, not a new pricing source** (spec 012 §18) | Only AWS S3 → non-AWS (tiered egress) and non-AWS → AWS S3 ($0 ingress) are calculated; every other endpoint pair shows "Not currently calculated" rather than an invented figure |
+| **Transfer §12 worked-example discrepancy resolved by deriving from the formula, not hard-coding either figure** (spec 012) | The spec text's 700 Mbps example ("≈3.41 h") doesn't match its own §11 formula (≈3.49 h); §12 itself instructs deriving values rather than hard-coding, so the implementation and tests compute from the formula and document the discrepancy rather than picking one number to trust |
 
 ---
 
@@ -935,13 +999,21 @@ Dated: 2026-09-15.
 
 ### Transfer
 
-- Define transfer endpoint model and transfer-method recommendations.
-- Establish practical throughput measurement guidance.
-- Determine how cloud egress pricing should be applied by endpoint.
-- Determine whether transfer staging storage should be explicitly costed.
-- Consider RTT/BDP advisory logic.
-- Test representative institutional/Ilifu → AWS transfer paths when
-  possible.
+- Establish practical throughput measurement guidance and gather measured
+  institutional/Ilifu ↔ AWS transfer figures to replace planning scenarios.
+- Determine whether transfer staging storage should be explicitly costed
+  (§11.3 remains Planned).
+- Verify current af-south-1 AWS egress pricing (shared with Storage,
+  currently UNVERIFIED placeholder rates).
+- Extend provider-cost modelling to endpoint pairs beyond AWS S3 (e.g.
+  Illumina ICA iCredits, institutional DTN charges where applicable).
+- Consider a migration of Storage's existing AWS-egress workflow assumption
+  into the Transfer module once cost ownership/deduplication is explicit
+  (spec 012 §17 — explicitly deferred, not done in 012).
+- Consider supporting multiple transfer legs in one plan (spec 012 §30 —
+  the model doesn't prevent this, but the V1 UI supports one at a time).
+- Design Cost-efficient/Balanced/Fast-style transfer-method recommendations
+  once method-specific throughput evidence exists (spec 012 §13).
 
 ### Storage
 
@@ -970,7 +1042,10 @@ until they have been evaluated.
 - Network throughput cannot be predicted reliably from geography alone.
 - Compute is implemented only for the WGS 30x profile's open-source
   reference workflow (§10); GLnexus, AWS compute pricing, Sentieon/ICA
-  runtime, Custom Project compute, and Transfer are not yet implemented.
+  runtime and Custom Project compute remain unimplemented within it.
+- Transfer (§11) provider cost is calculated only for AWS S3 ↔ non-AWS
+  endpoint pairs; every other pair shows "Not currently calculated," and
+  transfer-method selection does not change the calculated throughput.
 - The BWA-MEM2 benchmark behind Compute's alignment stage is one measured
   NA12878 execution on Ilifu hardware — not universal BWA-MEM2 performance,
   and AWS performance cannot be inferred exactly from Ilifu core counts.

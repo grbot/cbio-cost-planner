@@ -113,8 +113,31 @@ def render() -> None:
                 "Visit the Compute page to configure and calculate Compute figures for this "
                 "project. No compute cost or resource figures are shown here yet.",
             )
-        theme.callout(
-            "Transfer",
-            "Transfer results will be added in a later development stage. No transfer "
-            "duration or cost figures are shown here.",
-        )
+        if project.transfer_result is not None:
+            transfer = project.transfer_result
+            plan = transfer.plan
+            st.markdown("**Transfer**")
+            st.markdown(f"{plan.dataset_name}  \n{plan.source.label} → {plan.destination.label}")
+            tcol1, tcol2, tcol3 = st.columns(3)
+            tcol1.metric("Volume", f"{transfer.size_tb:.2f} TB")
+            if plan.throughput_mode == "unknown":
+                tcol2.metric("Throughput basis", "Planning scenarios")
+                tcol3.metric("Duration", "See Transfer page")
+            else:
+                tcol2.metric("Planning throughput", f"{transfer.throughput.effective_mbps:,.0f} Mbps")
+                tcol3.metric("Estimated duration", f"{transfer.duration_hours:,.1f} h")
+            st.caption(f"Method: {plan.transfer_method}")
+            if transfer.provider_cost.status == "calculated":
+                theme.callout("Provider transfer cost", f"${transfer.provider_cost.cost_usd:,.2f} — {transfer.provider_cost.basis}")
+            else:
+                theme.callout("Provider transfer cost — not currently calculated", transfer.provider_cost.basis)
+            st.caption(
+                "This is a separate endpoint-to-endpoint movement estimate, distinct from Storage's "
+                "workflow-egress assumption above; neither figure is folded into any combined total."
+            )
+        else:
+            theme.callout(
+                "Transfer",
+                "Visit the Transfer page to plan a data-movement leg for this project. No "
+                "transfer duration or cost figures are shown here yet.",
+            )

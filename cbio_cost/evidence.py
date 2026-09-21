@@ -14,6 +14,11 @@ EVIDENCE_LABELS: dict[str, str] = {
     "published_benchmark": "Published benchmark",
     "planning_assumption": "Planning assumption",
     "local_commercial_assumption": "Local commercial assumption",
+    # Transfer (spec 012) classifications — additive; the four above are
+    # unchanged and still used exactly as Compute (spec 011) established.
+    "measured_throughput": "Measured",
+    "planning_scenario": "Planning scenario",
+    "provider_pricing": "Published/provider pricing",
 }
 
 

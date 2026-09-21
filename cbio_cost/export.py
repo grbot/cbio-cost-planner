@@ -10,6 +10,7 @@ from typing import Any
 
 from cbio_cost.compute_models import ComputeResult
 from cbio_cost.models import CostEstimate, PricingConfig
+from cbio_cost.transfer_plan_models import TransferPlanResult
 from cbio_cost.units import gb_to_tb
 
 STORAGE_CLASS_LABELS = {
@@ -446,6 +447,134 @@ def compute_to_markdown(project_name: str, num_samples: int, result: ComputeResu
             f"- US${result.sentieon.usd_per_genome}/genome x {num_samples} samples = "
             f"US${result.sentieon.total_usd:,.2f} (R{result.sentieon.total_zar:,.2f})",
             f"- Status: {result.sentieon.status}",
+            "",
+            "## Limitations",
+            "",
+        ]
+    )
+    lines.extend(f"- {item}" for item in result.limitations)
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Transfer exports (spec 012 §32) — additive; Storage's/Compute's exports
+# above are untouched. Uses null/"not modelled" for unavailable figures,
+# never 0.
+# ---------------------------------------------------------------------------
+
+
+def _transfer_plan_payload(result: TransferPlanResult) -> dict[str, Any]:
+    plan = result.plan
+    throughput = result.throughput
+    return {
+        "dataset_name": plan.dataset_name,
+        "dataset_size_gb": str(plan.size_gb),
+        "dataset_size_tb": str(result.size_tb),
+        "source_endpoint": plan.source.label,
+        "destination_endpoint": plan.destination.label,
+        "source_location": plan.source.location or None,
+        "destination_location": plan.destination.location or None,
+        "throughput_mode": plan.throughput_mode,
+        "link_capacity_mbps": str(throughput.link_capacity_mbps) if throughput.link_capacity_mbps is not None else None,
+        "efficiency_percent": str(plan.efficiency_percent) if plan.efficiency_percent is not None else None,
+        "effective_throughput_mbps": str(throughput.effective_mbps) if throughput.effective_mbps is not None else None,
+        "measured_throughput_mbps": str(throughput.measured_mbps) if throughput.measured_mbps is not None else None,
+        "transfer_method": plan.transfer_method,
+        "estimated_seconds": str(result.duration_seconds) if result.duration_seconds is not None else None,
+        "estimated_hours": str(result.duration_hours) if result.duration_hours is not None else None,
+        "estimated_days": str(result.duration_days) if result.duration_days is not None else None,
+        "rtt_ms": str(result.bdp.rtt_ms) if result.bdp is not None else None,
+        "bandwidth_delay_product_bytes": str(result.bdp.bdp_bytes) if result.bdp is not None else None,
+        "provider_cost_status": result.provider_cost.status,
+        "provider_cost_usd": str(result.provider_cost.cost_usd) if result.provider_cost.cost_usd is not None else None,
+        "evidence_classification": throughput.evidence.classification if throughput.evidence is not None else "not modelled",
+    }
+
+
+def transfer_plan_to_json(project_name: str, result: TransferPlanResult) -> str:
+    """Render the Transfer planning result as JSON text (spec 012 §32)."""
+    payload: dict[str, Any] = {"project_name": project_name}
+    payload.update(_transfer_plan_payload(result))
+    if result.plan.throughput_mode == "unknown":
+        payload["scenarios"] = [
+            {
+                "label": s.label,
+                "throughput_mbps": str(s.throughput_mbps),
+                "estimated_seconds": str(s.duration_seconds),
+                "estimated_hours": str(s.duration_hours),
+                "estimated_days": str(s.duration_days),
+            }
+            for s in result.scenarios
+        ]
+    payload["limitations"] = result.limitations
+    return json.dumps(payload, indent=2, default=_json_default)
+
+
+def transfer_plan_to_csv(project_name: str, result: TransferPlanResult) -> str:
+    """Render the Transfer planning result as CSV text (spec 012 §32)."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["Project", project_name])
+    writer.writerow([])
+    for key, value in _transfer_plan_payload(result).items():
+        writer.writerow([key, value if value is not None else "not modelled"])
+    if result.plan.throughput_mode == "unknown":
+        writer.writerow([])
+        writer.writerow(["Planning throughput (Mbps)", "Estimated seconds", "Estimated hours", "Estimated days"])
+        for s in result.scenarios:
+            writer.writerow([str(s.throughput_mbps), str(s.duration_seconds), str(s.duration_hours), str(s.duration_days)])
+    return buffer.getvalue()
+
+
+def transfer_plan_to_markdown(project_name: str, result: TransferPlanResult) -> str:
+    """Render a concise Markdown Transfer planning summary (spec 012 §32)."""
+    plan = result.plan
+    lines = [
+        f"# {project_name} — Transfer Planning",
+        "",
+        f"- Dataset: {plan.dataset_name} ({plan.size_gb:,.0f} GB = {result.size_tb:.2f} TB)",
+        f"- {plan.source.label} → {plan.destination.label}",
+        f"- Throughput mode: {plan.throughput_mode}",
+        f"- Transfer method: {plan.transfer_method}",
+        "",
+    ]
+    if plan.throughput_mode == "unknown":
+        lines.extend(
+            [
+                "## Planning scenarios",
+                "",
+                "| Planning throughput | Estimated duration |",
+                "|---:|---:|",
+            ]
+        )
+        for s in result.scenarios:
+            lines.append(f"| {s.label} | {s.duration_hours:.2f} h ({s.duration_days:.2f} d) |")
+        lines.append("")
+    else:
+        lines.extend(
+            [
+                f"**Effective throughput:** {result.throughput.effective_mbps} Mbps",
+                f"**Estimated transfer duration:** {result.duration_hours:.2f} h "
+                f"({result.duration_days:.2f} d)",
+                "",
+            ]
+        )
+    if result.bdp is not None:
+        lines.extend(
+            [
+                f"- RTT: {result.bdp.rtt_ms} ms; bandwidth-delay product: {result.bdp.bdp_mb:.1f} MB "
+                "(informational only, not additional project storage)",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Cost status",
+            "",
+            f"- Provider transfer cost: {result.provider_cost.status}"
+            + (f" (${result.provider_cost.cost_usd:,.2f})" if result.provider_cost.cost_usd is not None else ""),
+            f"- {result.provider_cost.basis}",
             "",
             "## Limitations",
             "",

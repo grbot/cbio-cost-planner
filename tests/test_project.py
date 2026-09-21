@@ -12,6 +12,8 @@ import streamlit as st
 from cbio_cost.calculator import build_estimate
 from cbio_cost.config import build_wgs_datasets, load_currency_defaults, load_pricing, load_profiles
 from cbio_cost.project import PROJECT_SESSION_KEY, Project, ProjectMetadata
+from cbio_cost.transfer_plan import build_transfer_plan_result
+from cbio_cost.transfer_plan_models import Endpoint, TransferPlan
 from views import storage
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -69,6 +71,29 @@ def test_project_metadata_custom_project_has_no_sample_count():
         name="Custom", project_type="Custom Project", num_samples=None, retention_years=Decimal(2)
     )
     assert metadata.num_samples is None
+
+
+def test_with_transfer_attaches_config_and_result_without_touching_other_fields(profile, wgs_datasets, estimate, pricing):
+    """spec 012: Project.with_transfer() attaches Transfer config/result the
+    same way with_compute() does, without recomputing or disturbing Storage
+    or Compute state."""
+    project = Project.from_storage(profile.project, wgs_datasets, estimate)
+    plan = TransferPlan(
+        dataset_name="FASTQ",
+        size_gb=Decimal(1024),
+        source=Endpoint(type="institutional", label="Institutional / local storage"),
+        destination=Endpoint(type="aws_s3", label="AWS S3"),
+        throughput_mode="unknown",
+        transfer_method="Not yet selected",
+    )
+    result = build_transfer_plan_result(plan, pricing)
+
+    updated = project.with_transfer(plan, result)
+
+    assert updated.transfer_config is plan
+    assert updated.transfer_result is result
+    assert updated.storage_estimate is project.storage_estimate
+    assert updated.compute_result is None
 
 
 # ---------------------------------------------------------------------------
