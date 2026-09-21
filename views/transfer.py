@@ -85,13 +85,17 @@ def _default_state(first_dataset_choice: str) -> dict:
     }
 
 
-def _endpoint_from_state(prefix: str) -> Endpoint:
+def _endpoint_from_state(prefix: str, canonical: dict) -> Endpoint:
     endpoint_type = st.session_state[f"transfer_{prefix}_type"]
     if endpoint_type == "custom":
         label = st.session_state[f"transfer_{prefix}_custom_name"].strip()
     else:
         label = ENDPOINT_TYPES[endpoint_type]
-    location = st.session_state.get(f"transfer_{prefix}_location", "")
+    # Fall back to the last canonical value, not a hardcoded blank (spec
+    # 012d §10, §42) -- a missing widget key must never present a configured
+    # location as empty.
+    location_key = f"transfer_{prefix}_location"
+    location = st.session_state.get(location_key, canonical.get(location_key, ""))
     return Endpoint(type=endpoint_type, label=label, location=location)
 
 
@@ -225,9 +229,15 @@ def render() -> None:
             if st.session_state["transfer_destination_type"] == "custom":
                 st.text_input("Destination name", key="transfer_destination_custom_name")
 
+    # Defensive re-heal immediately before reading endpoint/location values
+    # (spec 012d §7-9, §42-44): idempotent no-op if line 156's heal already
+    # populated every key, but removes any remaining window between a
+    # widget key's possible removal and its use here.
+    sync_widget_defaults(state.transfer_widgets)
+
     try:
-        source = _endpoint_from_state("source")
-        destination = _endpoint_from_state("destination")
+        source = _endpoint_from_state("source", state.transfer_widgets)
+        destination = _endpoint_from_state("destination", state.transfer_widgets)
     except ValueError as exc:
         st.error(f"Invalid endpoint: {exc}")
         st.stop()
@@ -294,11 +304,13 @@ def render() -> None:
     # reads transfer_{source,destination}_location). Network path details —
     # the widgets for those location fields, plus RTT — are rendered as
     # section 7, below the estimate, matching the spec's suggested page
-    # order; their session-state values already exist (seeded by
-    # _default_state()), so reading them here before that widget is drawn is
-    # safe — a Streamlit widget's session-state value reflects the *previous*
-    # run at the top of a script, and drawing it later only changes where the
-    # control appears on screen.
+    # order. Reading them here, before that widget is (re-)drawn later this
+    # run, relies on a Streamlit widget's session-state value from the
+    # *previous* run persisting at the top of the current one regardless of
+    # draw order (spec 012a) — hardened by the explicit re-heal above and
+    # _endpoint_from_state()'s canonical-state fallback (spec 012d §7-10,
+    # §42-44), so a widget key that Streamlit removed between runs is
+    # restored from ``ProjectState`` rather than silently reset to blank.
 
     # ---------------------------------------------------------------------
     # Build plan -> run calculation
@@ -336,7 +348,14 @@ def render() -> None:
     # and permanently drop a key from canonical state with no way for later
     # healing to recover it (a canonical state with a hole stays full of
     # holes, since healing only ever fills gaps *from* canonical state).
-    transfer_widgets = {key: st.session_state[key] for key in _default_state(default_choice)}
+    # Falls back to the previous canonical value (not the hardcoded default)
+    # for any key that is somehow still missing (spec 012d §10, §42) — a
+    # missing widget key must never write a fresh default over a configured
+    # value.
+    transfer_widgets = {
+        key: st.session_state.get(key, state.transfer_widgets.get(key, default))
+        for key, default in _default_state(default_choice).items()
+    }
     record_transfer(state, plan, transfer_widgets, result)
 
     # ---------------------------------------------------------------------

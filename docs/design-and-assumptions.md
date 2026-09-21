@@ -247,6 +247,40 @@ already guarantees every key exists by that point, so the filter could
 only ever silently and permanently drop a key from canonical state with no
 way for later healing to recover it.
 
+**Transfer widget-lifecycle hardening and its regression coverage** (spec
+012d): a deployed review after 012c reported several Transfer fields
+(measured throughput, RTT value, source/destination location, note)
+resetting to defaults after a full Storage→Compute→Transfer→Summary round
+trip, and a module's flow-indicator staying `Complete` after an upstream
+dependency change. Investigation found the module-status mechanism
+described above (revision counters + `*_calculated_for` stamps) already
+produces the correct `Needs review` transition for the reported
+sample-count scenario, and `tests/test_state_navigation.py`'s existing
+render()-call-sequence tests already passed for both defects — because
+that test harness calls view `render()` functions directly in one Python
+process and never actually removes a widget's `st.session_state` entry,
+so it cannot exercise the one Streamlit behaviour that motivated
+`sync_widget_defaults()` in the first place (spec 012a §7-8): a widget's
+session-state key can be individually absent on any script run in which
+that widget is not instantiated (an unrendered page, or a
+conditionally-hidden field). `tests/test_state_navigation.py` §8 now adds
+that missing regression category, explicitly `del`eting every Transfer
+widget key (including the conditionally-rendered measured-throughput/RTT/
+note fields and the always-rendered-but-built-from-earlier
+`_endpoint_from_state()` location fields) between renders — all pass
+against the pre-012d code, but two remaining fragile spots were hardened
+defensively regardless: `_endpoint_from_state()` (`views/transfer.py`) now
+falls back to the last canonical `transfer_widgets` value rather than a
+hardcoded blank if a location key is ever missing, and the final canonical
+capture reads each key via `st.session_state.get(key, transfer_widgets.get(key,
+default))` rather than a bare `st.session_state[key]`, so a genuinely
+missing key can never write a fresh default over a configured value (the
+exact failure mode spec 012d §42 warns against). An extra
+`sync_widget_defaults()` call immediately before the endpoint/location
+reads (rather than relying solely on the one at the top of `render()`)
+closes any remaining window between key removal and use. No visible
+layout changed.
+
 **Guided flow, completed** (spec 012a §14-§16, completed in spec 012c
 §18-21): a restrained, text-only status line ("1 Storage: Complete · 2
 Compute: Complete · 3 Transfer: Needs review · 4 Project Summary")

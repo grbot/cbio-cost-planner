@@ -449,3 +449,262 @@ def test_1000_sample_reconfiguration_remains_configured():
     storage.render()
     state = get_project_state()
     assert state.project_configured is True
+
+
+# 8. Real widget-lifecycle key-deletion regression (spec 012d §45-46) -------
+#
+# Every test above that exercises "round trip navigation" does so by calling
+# view render() functions directly in one Python process against one shared
+# st.session_state dict -- it never actually removes a widget's session-state
+# entry, so it cannot reproduce the one Streamlit behaviour spec 012a's own
+# module docstring names as the reason sync_widget_defaults() exists: a
+# widget's st.session_state key can be individually absent on any given
+# script run (e.g. because that widget -- or the whole page -- was not
+# instantiated on an intervening run). The tests below explicitly `del` each
+# Transfer widget key between renders to simulate that removal for real,
+# which is what actually distinguishes a defect from a false-passing test.
+
+ALL_TRANSFER_WIDGET_KEYS = [
+    "transfer_dataset_choice",
+    "transfer_custom_name",
+    "transfer_custom_size",
+    "transfer_custom_unit",
+    "transfer_source_type",
+    "transfer_source_custom_name",
+    "transfer_destination_type",
+    "transfer_destination_custom_name",
+    "transfer_throughput_mode",
+    "transfer_measured_mbps",
+    "transfer_measured_note",
+    "transfer_link_capacity_mbps",
+    "transfer_efficiency_percent",
+    "transfer_method",
+    "transfer_source_location",
+    "transfer_destination_location",
+    "transfer_rtt_enabled",
+    "transfer_rtt_ms",
+]
+
+
+def _configure_full_distinctive_transfer_scenario() -> None:
+    """spec 012d §30: every editable Transfer field set to a distinctive,
+    non-default value."""
+    storage.ensure_project_state()
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_source_type": "institutional",
+            "transfer_source_location": "Cape Town test location",
+            "transfer_destination_type": "aws_s3",
+            "transfer_destination_location": "AWS Cape Town test location",
+            "transfer_throughput_mode": "measured",
+            "transfer_measured_mbps": 777.0,
+            "transfer_measured_note": "012d persistence test",
+            "transfer_method": "Globus",
+            "transfer_rtt_enabled": True,
+            "transfer_rtt_ms": 137.0,
+        }
+    )
+    transfer.render()
+
+
+def _delete_keys(*keys: str) -> None:
+    for key in keys:
+        del st.session_state[key]
+
+
+def test_transfer_measured_throughput_survives_widget_key_deletion():
+    """Test A (spec §46): 777 Mbps survives widget-key removal + rehydration."""
+    st.session_state.clear()
+    _configure_reviewed_scenario()  # measured mode, 777 Mbps
+
+    _delete_keys("transfer_measured_mbps")
+    summary.render()
+    storage.render()
+    compute.render()
+    transfer.render()
+
+    assert st.session_state["transfer_measured_mbps"] == 777.0
+    state = get_project_state()
+    assert transfer_status(state) == COMPLETE
+    assert state.transfer_result.duration_hours is not None
+
+
+def test_transfer_rtt_survives_widget_key_deletion():
+    """Test B (spec §46): RTT enabled + 137 ms survive widget-key removal."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_throughput_mode": "measured",
+            "transfer_measured_mbps": 777.0,
+            "transfer_rtt_enabled": True,
+            "transfer_rtt_ms": 137.0,
+        }
+    )
+    transfer.render()
+
+    _delete_keys("transfer_rtt_enabled", "transfer_rtt_ms")
+    summary.render()
+    storage.render()
+    compute.render()
+    transfer.render()
+
+    assert st.session_state["transfer_rtt_enabled"] is True
+    assert st.session_state["transfer_rtt_ms"] == 137.0
+    state = get_project_state()
+    assert transfer_status(state) == COMPLETE
+    assert state.transfer_result.bdp is not None
+    assert state.transfer_result.bdp.rtt_ms == Decimal("137.0")
+
+
+def test_transfer_locations_survive_widget_key_deletion():
+    """Test C (spec §46): distinctive source/destination locations survive
+    widget-key removal -- these are read via _endpoint_from_state()'s
+    st.session_state.get(key, "") fallback (views/transfer.py), which must
+    fall back to canonical state, not a hardcoded blank."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_source_location": "Cape Town test location",
+            "transfer_destination_location": "AWS Cape Town test location",
+        }
+    )
+    transfer.render()
+
+    _delete_keys("transfer_source_location", "transfer_destination_location")
+    summary.render()
+    storage.render()
+    compute.render()
+    transfer.render()
+
+    assert st.session_state["transfer_source_location"] == "Cape Town test location"
+    assert st.session_state["transfer_destination_location"] == "AWS Cape Town test location"
+    state = get_project_state()
+    assert transfer_status(state) == COMPLETE
+
+
+def test_transfer_note_survives_widget_key_deletion():
+    """Test D (spec §46): a distinctive note survives widget-key removal."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_throughput_mode": "measured",
+            "transfer_measured_mbps": 777.0,
+            "transfer_measured_note": "012d persistence test",
+        }
+    )
+    transfer.render()
+
+    _delete_keys("transfer_measured_note")
+    summary.render()
+    storage.render()
+    compute.render()
+    transfer.render()
+
+    assert st.session_state["transfer_measured_note"] == "012d persistence test"
+    state = get_project_state()
+    assert transfer_status(state) == COMPLETE
+
+
+def test_full_transfer_configuration_survives_widget_key_deletion_round_trip():
+    """Test E (spec §46, §30-31): every editable Transfer field, configured
+    with a distinctive value, survives a full round trip with every single
+    transfer_* widget key explicitly deleted before each return to Transfer
+    -- the closest simulation of the deployed 012c/012d bug report available
+    without a real browser."""
+    st.session_state.clear()
+    _configure_full_distinctive_transfer_scenario()
+
+    for _ in range(2):
+        _delete_keys(*ALL_TRANSFER_WIDGET_KEYS)
+        summary.render()
+        storage.render()
+        compute.render()
+        transfer.render()
+
+    assert st.session_state["transfer_dataset_choice"] == "FASTQ"
+    assert st.session_state["transfer_source_location"] == "Cape Town test location"
+    assert st.session_state["transfer_destination_location"] == "AWS Cape Town test location"
+    assert st.session_state["transfer_throughput_mode"] == "measured"
+    assert st.session_state["transfer_measured_mbps"] == 777.0
+    assert st.session_state["transfer_measured_note"] == "012d persistence test"
+    assert st.session_state["transfer_method"] == "Globus"
+    assert st.session_state["transfer_rtt_enabled"] is True
+    assert st.session_state["transfer_rtt_ms"] == 137.0
+
+    state = get_project_state()
+    assert transfer_status(state) == COMPLETE
+    assert state.transfer_result.duration_hours is not None
+    assert state.transfer_result.bdp is not None
+    assert state.transfer_result.bdp.rtt_ms == Decimal("137.0")
+
+
+def test_transfer_measured_mode_survives_switch_away_and_back_with_key_deletion():
+    """spec §13, §32: measured throughput must be retained (not silently
+    erased) when switching to known_capacity mode and back, even if the
+    inactive mode's widget key is removed while its widget isn't drawn."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_throughput_mode": "measured",
+            "transfer_measured_mbps": 777.0,
+        }
+    )
+    transfer.render()
+
+    # Switch to known_capacity -- transfer_measured_mbps's widget is no
+    # longer drawn this run, so simulate Streamlit removing its key.
+    st.session_state["transfer_throughput_mode"] = "known_capacity"
+    st.session_state.setdefault("transfer_link_capacity_mbps", 1000.0)
+    st.session_state.setdefault("transfer_efficiency_percent", 70.0)
+    _delete_keys("transfer_measured_mbps")
+    transfer.render()
+    assert st.session_state["transfer_throughput_mode"] == "known_capacity"
+
+    # Switch back to measured -- 777 must be restored, not reset to 0.
+    st.session_state["transfer_throughput_mode"] = "measured"
+    transfer.render()
+
+    assert st.session_state["transfer_measured_mbps"] == 777.0
+
+
+def test_transfer_rtt_value_survives_disable_and_reenable_with_key_deletion():
+    """spec §13, §32: RTT value must be retained across disabling and
+    re-enabling RTT, even if the value widget's key is removed while
+    RTT is disabled."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_rtt_enabled": True,
+            "transfer_rtt_ms": 137.0,
+        }
+    )
+    transfer.render()
+
+    # Disable RTT -- transfer_rtt_ms's widget is no longer drawn this run.
+    st.session_state["transfer_rtt_enabled"] = False
+    _delete_keys("transfer_rtt_ms")
+    transfer.render()
+    assert st.session_state["transfer_rtt_enabled"] is False
+
+    # Re-enable RTT -- 137 ms must be restored, not reset to 0.
+    st.session_state["transfer_rtt_enabled"] = True
+    transfer.render()
+
+    assert st.session_state["transfer_rtt_ms"] == 137.0
