@@ -50,7 +50,11 @@ combined cross-module total. See §10 and §11 for exactly what is/isn't
 implemented within Compute and Transfer respectively — several items
 within each (e.g. AWS compute/transfer pricing verification, GLnexus,
 Sentieon/ICA costing, transfer staging storage) remain Planned or Under
-investigation.
+investigation. Since spec 012a, project configuration/results are held in
+one canonical, session-level `ProjectState` independent of page widget
+lifecycle (§4), so navigating freely between modules never loses
+configuration or presents results calculated from incompatible project
+states.
 
 ---
 
@@ -132,6 +136,101 @@ opening a non-Storage page directly in a fresh session could show a
 contradictory "no project configured" message, because `st.navigation` only
 executes the render function of the page actually displayed and Storage's
 own session-state seeding never ran.
+
+### Canonical project state and widget healing (spec 012a)
+
+> Streamlit widgets are views onto project state. They are not the
+> project state. (spec 012a §7)
+
+A deployed end-to-end review after Transfer (012) found that page-specific
+Streamlit widget state was being treated as if it *were* the durable
+project configuration: navigating between pages could reset Storage/
+Compute inputs to defaults, Transfer could crash with a `KeyError` on a
+missing widget key, and Project Summary could combine results calculated
+from *different* project configurations (e.g. an old 500-sample Storage
+result alongside a freshly-reset 1-worker Compute result) with no
+indication they were incompatible. The underlying calculation engines were
+never wrong — reproducing the reviewed 500-sample/7-worker/13-worker/
+333 GiB-scratch/777 Mbps scenario end-to-end gives exactly the reported
+figures (419.04 h; 2,331/4,329 GiB peaks; 48.828125 TB / ≈153.5 h) — this
+was purely a state-persistence and presentation-integrity problem.
+
+`cbio_cost/project_state.py` now holds one canonical, session-level
+`ProjectState` per session (`st.session_state["project_state"]`),
+independent of which page's widgets happen to be drawn on a given script
+run. Each page's widget-backed session-state keys are seeded from this
+canonical state, and healed back from it individually — every render, not
+once behind a single boolean "loaded" flag — via `sync_widget_defaults()`:
+
+    if key not in st.session_state:
+        st.session_state[key] = canonical_value
+
+This is the direct fix for both the reset and crash defects: before spec
+012a, all of a page's widget defaults were gated behind one flag (e.g.
+`"transfer_loaded"`); if that flag survived a navigation but one individual
+widget key did not, the next bare `st.session_state[key]` read crashed —
+exactly the reproduced Transfer crash. Per-key healing makes each widget
+key independently self-healing regardless of the flag's state. The
+existing `cbio_cost.project.Project` read-model is unchanged — it is simply
+rebuilt from `ProjectState` after each module's render, so no downstream
+reader (Compute, Transfer, Project Summary) needed to change how it reads
+project identity or results.
+
+**Shared vs. module-specific inputs** (spec 012a §9): Storage's `usd_zar`,
+`vat_percent`, `project_mode`, `num_samples`, `retention_years` and the
+resolved dataset list (size and lifecycle) are shared project inputs;
+headroom/archive-class/active-months/transfer-contingency/engineering
+figures are Storage-specific; concurrency/scratch/runtime-overrides are
+Compute-specific; dataset choice/endpoints/throughput/method/RTT are
+Transfer-specific. Compute's Sentieon ZAR conversion now reads Storage's
+shared `usd_zar` (`views/compute.py`) instead of a separate hardcoded
+constant it used prior to 012a — changing the exchange rate in one place
+is now reflected everywhere that depends on it.
+
+**Four revision counters**, not a full dependency graph (spec 012a §12
+explicitly permits "a conservative broad invalidation model... if it is
+correct and clearly documented"):
+
+| Counter | Bumped by | Invalidates |
+|---|---|---|
+| `project_revision` | project mode, sample count, retention, USD/ZAR, VAT, or any dataset-size-affecting input (WGS volumes/movement, Custom Project dataset list) | Storage, Compute, Transfer |
+| `storage_config_revision` | headroom, archive class, active months, transfer contingency, engineering hours/rate | Storage only |
+| `compute_config_revision` | concurrency, scratch, runtime overrides | Compute only |
+| `transfer_config_revision` | dataset choice, endpoints, throughput, method, RTT | Transfer only |
+
+A dataset-*size* change conservatively also invalidates Compute even
+though Compute's own calculation only depends on `num_samples`, not
+per-sample volumes — a deliberate, documented over-invalidation rather
+than a five-edge dependency graph. Each module's result is stamped with
+`calculated_for = (project_revision, <module>_config_revision)` at the
+moment it is computed; a module is **Complete** if that tuple still
+matches the live counters, **Needs review** if not, or **Not configured**
+if no result has been computed yet. Compute and Transfer recompute fresh
+on every visit to their own page (neither caches anything), so staleness
+is only ever *visible* on Project Summary, which reads stored results
+without recomputing — Storage/Compute/Transfer pages themselves need no
+"stale" banners of their own.
+
+**Guided flow** (spec 012a §14-§16): a restrained, text-only status line
+("Storage: Complete · Compute: Complete · Transfer: Needs review · Project
+Summary") appears on Project Summary. There are deliberately no clickable
+"Continue to X" page-jump buttons — implementing them via `st.page_link`
+would require sharing the actual `st.Page` objects `app.py` creates with
+each view module, which cannot be done without a circular import (the
+module defining the pages would need to import the render functions, which
+would need to import it back); the existing top navigation already lets
+users jump to any module freely, and spec 012a itself hedges "where
+appropriate" and warns against fragile custom routing.
+
+**Financial summary** (spec 012a §22-§26): Project Summary presents a
+"Current included total" breakdown (Storage lifecycle + Planned workflow
+egress + Engineering) rather than an unqualified "Total project cost,"
+followed by a "Not yet included" list (Compute infrastructure, explicit
+Transfer-plan cost, GLnexus). Storage's existing planned-egress assumption
+(§11 below) and an explicit Transfer plan's provider charge remain
+separately labelled and are never summed together or folded into the
+included total, since they may represent different movements and cost
+ownership/deduplication between them has not been established.
 
 ### WGS 30x template
 
@@ -423,10 +522,20 @@ volume, per-dataset storage lifecycle (archive class), storage-related
 cost, engineering cost, and the relevant headroom/contingency/currency
 assumptions — and never fabricates a Compute or Transfer figure. Because
 Streamlit only reruns the page currently being viewed, these figures
-reflect Storage's last-computed values in the session rather than
+reflect each module's last-computed values in the session rather than
 recalculating live; the page says so explicitly. Before Storage has been
-visited in a session, it shows a plain "visit Storage" notice instead of
-inventing data.
+configured in a session, it shows a "Project setup is not complete" notice
+instead of inventing data, and if the project is still at its 1-sample
+minimum-valid default (§4), it says so explicitly rather than implying
+that reflects a real configured project (spec 012a §21).
+
+Since spec 012a, Project Summary also checks each module's result against
+the canonical `ProjectState`'s revision counters (§4) before presenting it
+as current: a result calculated before a later upstream change is shown
+with a **"Needs review"** callout rather than silently as authoritative,
+and a compact guided-flow status line ("Storage: Complete · Compute:
+Complete · Transfer: Needs review · Project Summary") appears near the top
+of the page.
 
 The detailed Cost Summary panel (dataset totals, cost breakdown,
 sensitivity table, plain-English explanation, calculation-detail trace)
@@ -967,6 +1076,10 @@ Dated: 2026-09-15.
 | **Transfer's engine module is named `cbio_cost/transfer_plan.py`, not `cbio_cost/transfer.py`** (spec 012) | `cbio_cost/transfer.py` already existed as Storage's own AWS-egress-cost engine (spec 006 §6-§8), used by `cbio_cost/calculator.py`; reusing that name for the new endpoint-to-endpoint movement planner would have shadowed a load-bearing module. The two never import from each other |
 | **Transfer provider cost reuses `cbio_cost.storage.tiered_cost` and `config/aws-pricing.yaml`'s egress tiers directly, not a new pricing source** (spec 012 §18) | Only AWS S3 → non-AWS (tiered egress) and non-AWS → AWS S3 ($0 ingress) are calculated; every other endpoint pair shows "Not currently calculated" rather than an invented figure |
 | **Transfer §12 worked-example discrepancy resolved by deriving from the formula, not hard-coding either figure** (spec 012) | The spec text's 700 Mbps example ("≈3.41 h") doesn't match its own §11 formula (≈3.49 h); §12 itself instructs deriving values rather than hard-coding, so the implementation and tests compute from the formula and document the discrepancy rather than picking one number to trust |
+| **Canonical `ProjectState` holds flat `dict[str, Any]` widget-value snapshots, not a parallel dataclass hierarchy** (spec 012a §6) | Spec 012a explicitly sanctions "typed dictionaries... existing domain models extended cleanly"; a flat dict keyed like each page's own widget keys is additive and low-risk compared to redesigning `ProjectInputs`/`ComputeConfig`/`TransferPlan`, and directly supports per-key healing (§8) |
+| **Four revision counters (project/storage/compute/transfer), not a full dependency graph** (spec 012a §12) | Spec 012a explicitly permits "a conservative broad invalidation model... if it is correct and clearly documented"; a dataset-size change conservatively also invalidates Compute even though Compute's own calculation only depends on sample count, in exchange for far less complexity than a five-edge graph |
+| **No `st.page_link`/`st.switch_page` guided-flow buttons** (spec 012a §15) | Requires sharing the `st.Page` objects `app.py` creates with each view module, which cannot be done without a circular import; spec 012a itself hedges "where appropriate" and warns against fragile custom routing, and the existing top navigation already provides free navigation |
+| **Compute's Sentieon ZAR conversion now reads Storage's shared `usd_zar` instead of a separate hardcoded constant** (spec 012a §9, §37) | Spec 012a explicitly lists USD/ZAR as a shared project input and tests that changing it invalidates dependent financial outputs; the previous hardcoded `AWS_DEFAULT_USD_ZAR` in `views/compute.py` silently ignored Storage's editable rate |
 
 ---
 
@@ -1023,6 +1136,19 @@ Dated: 2026-09-15.
   replace the generic gVCF planning value.
 - Continue validating lifecycle assumptions against real project access
   patterns.
+
+### Project state
+
+- Consider a finer-grained dependency model (beyond the current four
+  conservative revision counters, §4) if the conservative Compute
+  over-invalidation on dataset-size-only changes proves noisy in practice.
+- Revisit clickable guided-flow "Continue to X" navigation if a
+  non-circular way to share `st.Page` objects between `app.py` and view
+  modules becomes available in a future Streamlit version.
+- Consider extending canonical-state revision tracking to Custom Project's
+  per-dataset widgets individually, rather than the current whole-list
+  `custom_datasets` snapshot comparison, if finer within-list change
+  detection becomes useful.
 
 Open research items are not to be turned into application assumptions
 until they have been evaluated.

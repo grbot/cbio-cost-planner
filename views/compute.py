@@ -25,10 +25,11 @@ from cbio_cost import export as cost_export
 from cbio_cost.compute_models import ComputeConfig, ComputeResult
 from cbio_cost.evidence import Evidence
 from cbio_cost.project import PROJECT_SESSION_KEY, Project
+from cbio_cost.project_state import get_project_state, record_compute, sync_widget_defaults
 
 WORKFLOW_STEPS = ["FASTQ", "BWA-MEM2", "CRAM", "DeepVariant", "gVCF", "GLnexus", "cohort VCF"]
 WORKFLOW_SUBTITLES: list[str | None] = [None, "modelled", None, "modelled", None, "benchmark pending", None]
-AWS_DEFAULT_USD_ZAR = Decimal("16.05")
+FALLBACK_USD_ZAR = Decimal("16.05")
 
 
 def _dec(value) -> Decimal:
@@ -135,9 +136,8 @@ def render() -> None:
         project_name = project.metadata.name or "Untitled project"
         st.markdown(f"**Project:** {project_name}  \n**Profile:** {num_samples} × 30× WGS")
 
-    if "compute_loaded" not in st.session_state:
-        st.session_state.update(_default_state())
-        st.session_state["compute_loaded"] = True
+    state = get_project_state()
+    sync_widget_defaults(state.compute_widgets or _default_state())
 
     # ---------------------------------------------------------------------
     # 2. Workflow — what processing occurs (spec 011a §4)
@@ -261,22 +261,37 @@ def render() -> None:
     # ---------------------------------------------------------------------
     # Build config -> run calculation
     # ---------------------------------------------------------------------
+    compute_widgets = {
+        "compute_alignment_concurrency": int(st.session_state["compute_alignment_concurrency"]),
+        "compute_deepvariant_concurrency": int(st.session_state["compute_deepvariant_concurrency"]),
+        "compute_scratch_gib_per_worker": float(st.session_state["compute_scratch_gib_per_worker"]),
+        "compute_alignment_override_enabled": st.session_state["compute_alignment_override_enabled"],
+        "compute_alignment_override_hours": float(st.session_state["compute_alignment_override_hours"]),
+        "compute_deepvariant_override_enabled": st.session_state["compute_deepvariant_override_enabled"],
+        "compute_deepvariant_override_hours": float(st.session_state["compute_deepvariant_override_hours"]),
+    }
     config = ComputeConfig(
-        alignment_concurrency=int(st.session_state["compute_alignment_concurrency"]),
-        deepvariant_concurrency=int(st.session_state["compute_deepvariant_concurrency"]),
-        scratch_gib_per_worker=_dec(st.session_state["compute_scratch_gib_per_worker"]),
+        alignment_concurrency=compute_widgets["compute_alignment_concurrency"],
+        deepvariant_concurrency=compute_widgets["compute_deepvariant_concurrency"],
+        scratch_gib_per_worker=_dec(compute_widgets["compute_scratch_gib_per_worker"]),
         alignment_runtime_override_hours=(
-            _dec(st.session_state["compute_alignment_override_hours"])
-            if st.session_state["compute_alignment_override_enabled"]
+            _dec(compute_widgets["compute_alignment_override_hours"])
+            if compute_widgets["compute_alignment_override_enabled"]
             else None
         ),
         deepvariant_runtime_override_hours=(
-            _dec(st.session_state["compute_deepvariant_override_hours"])
-            if st.session_state["compute_deepvariant_override_enabled"]
+            _dec(compute_widgets["compute_deepvariant_override_hours"])
+            if compute_widgets["compute_deepvariant_override_enabled"]
             else None
         ),
     )
-    result: ComputeResult = compute_engine.build_compute_result(num_samples, config, AWS_DEFAULT_USD_ZAR)
+    # Shared USD/ZAR planning rate (spec 012a §9): Sentieon's ZAR conversion
+    # now follows Storage's editable rate instead of a separate hardcoded
+    # constant, so changing it in one place is reflected everywhere (spec
+    # 012a §37 currency-invalidation requirement).
+    usd_zar = _dec(state.storage_widgets.get("usd_zar", FALLBACK_USD_ZAR))
+    result: ComputeResult = compute_engine.build_compute_result(num_samples, config, usd_zar)
+    record_compute(state, compute_widgets, result)
 
     # ---------------------------------------------------------------------
     # 5. Workflow stages

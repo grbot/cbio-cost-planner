@@ -39,6 +39,7 @@ from cbio_cost.models import (
     WgsMovementAssumptions,
 )
 from cbio_cost.project import PROJECT_SESSION_KEY, Project
+from cbio_cost.project_state import get_project_state, record_storage, sync_widget_defaults
 from cbio_cost.units import gb_to_tb
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -90,6 +91,28 @@ def _init_custom_datasets() -> None:
         st.session_state["custom_dataset_ids"] = [1]
         st.session_state["custom_next_id"] = 2
         _seed_custom_dataset_defaults(1, "Dataset 1")
+
+
+def _heal_custom_dataset_widgets(canonical_datasets: list[Dataset] | None) -> None:
+    """Reseed any individually-missing per-dataset widget key from the last
+    canonical dataset list (spec 012a §8) — ``custom_dataset_ids`` surviving
+    while a specific ``custom_name_{id}`` key does not is exactly the class
+    of partial state loss spec 012a reproduces for Transfer (§4)."""
+    ids = st.session_state.get("custom_dataset_ids", [])
+    for i, dataset_id in enumerate(ids):
+        if f"custom_name_{dataset_id}" in st.session_state:
+            continue
+        if canonical_datasets and i < len(canonical_datasets):
+            d = canonical_datasets[i]
+            st.session_state[f"custom_name_{dataset_id}"] = d.name
+            st.session_state[f"custom_size_{dataset_id}"] = float(d.size_gb)
+            st.session_state[f"custom_unit_{dataset_id}"] = "GB"
+            st.session_state[f"custom_retrieval_{dataset_id}"] = float(d.retrieval_fraction * 100)
+            st.session_state[f"custom_passes_{dataset_id}"] = float(d.read_passes)
+            st.session_state[f"custom_active_months_{dataset_id}"] = float(d.active_months)
+            st.session_state[f"custom_archive_{dataset_id}"] = d.archive_class
+        else:
+            _seed_custom_dataset_defaults(dataset_id, f"Dataset {i + 1}")
 
 
 def _add_custom_dataset() -> None:
@@ -182,6 +205,55 @@ def _wgs_datasets_from_session_state():
     return num_samples, volumes, wgs_movement, active_months, datasets, headroom_fraction
 
 
+def _current_storage_widgets(datasets: list[Dataset]) -> dict:
+    """Canonical snapshot of every Storage input that matters for revision
+    tracking (spec 012a §6, §12), read from already-synced session state.
+
+    ``dataset_sizes_snapshot`` (shared — affects Storage/Compute/Transfer)
+    and ``dataset_lifecycle_snapshot`` (storage-only — archive class,
+    retrieval, read passes, active months, which affect Storage's own cost
+    but not Transfer's size-based presets or Compute at all) are derived
+    from the resolved dataset list rather than tracked per raw widget, so
+    this works identically for WGS and Custom Project mode.
+    """
+    widgets = {
+        "project_mode": st.session_state["project_mode"],
+        "project_name": st.session_state["project_name"],
+        "num_samples": st.session_state.get("num_samples") if st.session_state["project_mode"] == WGS_MODE else None,
+        "retention_years": st.session_state["retention_years"],
+        "usd_zar": st.session_state["usd_zar"],
+        "vat_percent": st.session_state["vat_percent"],
+        # Derived snapshots, used for shared-vs-storage-only revision
+        # comparison (record_storage) — a change to any raw contributing
+        # field below (volumes, movement, custom dataset entries) shows up
+        # here automatically, without tracking each raw field separately.
+        "dataset_sizes_snapshot": tuple((d.name, d.size_gb) for d in datasets),
+        "dataset_lifecycle_snapshot": tuple(
+            (d.name, d.archive_class, d.retrieval_fraction, d.read_passes, d.active_months) for d in datasets
+        ),
+        "headroom_percent": st.session_state.get("headroom_percent"),
+        "active_months": st.session_state.get("active_months"),
+        "transfer_contingency_percent": st.session_state["transfer_contingency_percent"],
+        "onboarding_hours": st.session_state["onboarding_hours"],
+        "operations_hours_per_year": st.session_state["operations_hours_per_year"],
+        "closeout_hours": st.session_state["closeout_hours"],
+        "hourly_rate_zar": st.session_state["hourly_rate_zar"],
+        "custom_datasets": tuple(datasets) if st.session_state["project_mode"] != WGS_MODE else None,
+    }
+    # Raw WGS per-field widget keys: not compared individually for revision
+    # purposes (their net effect is already captured by the snapshots
+    # above), but must still be present here so sync_widget_defaults() can
+    # heal any of them if individually missing (spec 012a §8).
+    for file_type in WGS_FILE_TYPES:
+        widgets[f"vol_{file_type}"] = st.session_state.get(f"vol_{file_type}")
+        widgets[f"archive_{file_type}"] = st.session_state.get(f"archive_{file_type}")
+    widgets["fastq_passes"] = st.session_state.get("fastq_passes")
+    widgets["cram_retrieval_percent"] = st.session_state.get("cram_retrieval_percent")
+    widgets["cram_retrieval_passes"] = st.session_state.get("cram_retrieval_passes")
+    widgets["gvcf_passes"] = st.session_state.get("gvcf_passes")
+    return widgets
+
+
 def _build_project_from_session_state() -> Project:
     """Build the shared WGS 30x Project from current session-state values,
     without requiring any widget to have been drawn (spec 011a §3). Used to
@@ -213,6 +285,10 @@ def _build_project_from_session_state() -> Project:
     )
     estimate = build_estimate(inputs, datasets, engineering, pricing, currency)
     estimate.explanation = explain_result(estimate)
+
+    state = get_project_state()
+    record_storage(state, _current_storage_widgets(datasets), estimate)
+
     return Project.from_storage(inputs, datasets, estimate)
 
 
@@ -222,20 +298,27 @@ def ensure_project_state() -> None:
     Seeds minimum-valid WGS defaults (spec 011a §2) — never the 500-sample
     example — so direct navigation to Compute/Transfer/Project Summary in a
     fresh session sees a coherent, if minimal, project instead of a
-    contradictory "no project configured" state."""
-    if "loaded" not in st.session_state:
-        st.session_state.update(_minimum_valid_state())
-        st.session_state["loaded"] = True
+    contradictory "no project configured" state. Also establishes the
+    canonical ProjectState (spec 012a §6) so it exists before any page's
+    widgets are drawn."""
+    state = get_project_state()
+    if not state.storage_widgets:
+        sync_widget_defaults(_minimum_valid_state())
     if PROJECT_SESSION_KEY not in st.session_state:
         st.session_state[PROJECT_SESSION_KEY] = _build_project_from_session_state()
 
 
 def render() -> None:
-    _init_custom_datasets()
+    state = get_project_state()
+    # Per-key healing every render (spec 012a §8), not a single one-time
+    # flag: seeds minimum-valid defaults only for a genuinely new project
+    # (state.storage_widgets empty), otherwise heals any individually-
+    # missing widget key from the last canonical values so navigation can
+    # never silently reset a configured project (spec 012a §2-§3).
+    sync_widget_defaults(state.storage_widgets or _minimum_valid_state())
 
-    if "loaded" not in st.session_state:
-        st.session_state.update(_minimum_valid_state())
-        st.session_state["loaded"] = True
+    _init_custom_datasets()
+    _heal_custom_dataset_widgets(state.storage_widgets.get("custom_datasets"))
 
     st.caption(
         "Early-stage planning and grant-budgeting tool for CBIO genomics projects. "
@@ -587,6 +670,12 @@ def render() -> None:
         # Storage result available to other modules (Project Summary today;
         # Compute/Transfer later) without them re-deriving it.
         st.session_state[PROJECT_SESSION_KEY] = Project.from_storage(inputs, datasets, estimate)
+
+        # Canonical project state (spec 012a §6): record this result against
+        # the current widget configuration, bumping revisions only where an
+        # actual value changed, so Project Summary can later tell whether
+        # this (or any other module's) result is still current.
+        record_storage(state, _current_storage_widgets(datasets), estimate)
 
         # Sensitivity scenarios (spec 006 §19): built from the *current* (possibly
         # edited) datasets, varying only movement behaviour and contingency.

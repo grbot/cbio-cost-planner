@@ -25,6 +25,7 @@ from cbio_cost import export as cost_export
 from cbio_cost import transfer_plan
 from cbio_cost.evidence import Evidence
 from cbio_cost.project import PROJECT_SESSION_KEY, Project
+from cbio_cost.project_state import get_project_state, record_transfer, sync_widget_defaults
 from cbio_cost.transfer_plan_models import (
     DEFAULT_EFFICIENCY_PERCENT,
     ENDPOINT_TYPES,
@@ -128,10 +129,14 @@ def render() -> None:
     dataset_options = preset_names + [CUSTOM_DATASET_LABEL]
     default_choice = preset_names[0] if preset_names else CUSTOM_DATASET_LABEL
 
-    if "transfer_loaded" not in st.session_state:
-        st.session_state.update(_default_state(default_choice))
-        st.session_state["transfer_loaded"] = True
-    if st.session_state["transfer_dataset_choice"] not in dataset_options:
+    state = get_project_state()
+    # Per-key healing every render (spec 012a §8), fixing the reproduced
+    # crash (spec 012a §4): previously all transfer_* defaults were gated
+    # behind one "transfer_loaded" flag, so if that flag survived but one
+    # individual key (e.g. "transfer_dataset_choice") did not, the next
+    # bare st.session_state[...] read below raised a KeyError.
+    sync_widget_defaults(state.transfer_widgets or _default_state(default_choice))
+    if st.session_state.get("transfer_dataset_choice") not in dataset_options:
         st.session_state["transfer_dataset_choice"] = default_choice
 
     # ---------------------------------------------------------------------
@@ -300,6 +305,13 @@ def render() -> None:
 
     pricing = _load_pricing()
     result: TransferPlanResult = transfer_plan.build_transfer_plan_result(plan, pricing)
+
+    transfer_widgets = {
+        key: st.session_state[key]
+        for key in _default_state(default_choice)
+        if key in st.session_state
+    }
+    record_transfer(state, transfer_widgets, result)
 
     # ---------------------------------------------------------------------
     # 6. Transfer estimate
