@@ -39,7 +39,14 @@ from cbio_cost.models import (
     WgsMovementAssumptions,
 )
 from cbio_cost.project import PROJECT_SESSION_KEY, Project
-from cbio_cost.project_state import get_project_state, record_storage, sync_widget_defaults
+from cbio_cost.project_state import (
+    STATUS_LABELS,
+    compute_status,
+    get_project_state,
+    record_storage,
+    sync_widget_defaults,
+    transfer_status,
+)
 from cbio_cost.units import gb_to_tb
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -319,6 +326,15 @@ def render() -> None:
 
     _init_custom_datasets()
     _heal_custom_dataset_widgets(state.storage_widgets.get("custom_datasets"))
+
+    theme.guided_flow_line(
+        [
+            ("1 Storage", "You are here"),
+            ("2 Compute", STATUS_LABELS[compute_status(state)]),
+            ("3 Transfer", STATUS_LABELS[transfer_status(state)]),
+            ("4 Project Summary", "Overview"),
+        ]
+    )
 
     st.caption(
         "Early-stage planning and grant-budgeting tool for CBIO genomics projects. "
@@ -923,6 +939,15 @@ def render() -> None:
                 file_name=f"{inputs.project_name.replace(' ', '_')}_cost_estimate.md",
                 mime="text/markdown",
             )
+
+    # Convenience forward action (spec 012c §21) — a deferred, function-
+    # local import is required to avoid a circular import with navigation.py
+    # (see that module's docstring). Using the top navigation instead
+    # behaves identically; this link is never required for state
+    # persistence.
+    from navigation import COMPUTE_PAGE
+
+    st.page_link(COMPUTE_PAGE, label="Continue to Compute →")
 
     theme.disclaimer(
         "Prototype planning tool — estimates should be validated before budgeting or procurement.",

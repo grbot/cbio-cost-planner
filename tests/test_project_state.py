@@ -11,10 +11,12 @@ import streamlit as st
 
 from cbio_cost.project_state import (
     COMPLETE,
+    INVALID,
     NEEDS_REVIEW,
     NOT_CONFIGURED,
     ProjectState,
     compute_status,
+    mark_transfer_invalid,
     record_compute,
     record_storage,
     record_transfer,
@@ -79,8 +81,10 @@ def test_compute_only_widget_change_bumps_compute_config_revision_only():
 def test_transfer_only_widget_change_bumps_transfer_config_revision_only():
     state = ProjectState()
     record_storage(state, _storage_widgets(), result="estimate")
-    record_transfer(state, {"transfer_throughput_mode": "unknown"}, result="transfer-1")
-    record_transfer(state, {"transfer_throughput_mode": "measured", "transfer_measured_mbps": 777.0}, result="transfer-2")
+    record_transfer(state, "plan-1", {"transfer_throughput_mode": "unknown"}, result="transfer-1")
+    record_transfer(
+        state, "plan-2", {"transfer_throughput_mode": "measured", "transfer_measured_mbps": 777.0}, result="transfer-2"
+    )
 
     assert state.transfer_config_revision == 1
     assert state.project_revision == 0
@@ -170,3 +174,102 @@ def test_sync_widget_defaults_heals_missing_key_only():
 
     assert st.session_state["existing_key"] == "user-edited-value"
     assert st.session_state["missing_key"] == "canonical-value-2"
+
+
+# 4. project_configured explicit flag (spec 012c §14-17) ---------------------
+
+
+def test_project_configured_starts_false():
+    state = ProjectState()
+    assert state.project_configured is False
+
+
+def test_project_configured_stays_false_after_noop_rerecord():
+    state = ProjectState()
+    widgets = _storage_widgets()
+    record_storage(state, widgets, result="estimate-1")
+    record_storage(state, dict(widgets), result="estimate-2")
+
+    assert state.project_configured is False
+
+
+def test_project_configured_becomes_true_after_any_change_including_name_only():
+    """project_name has no calculation effect and is tracked by neither
+    revision counter, but changing it must still count as configuring the
+    project (spec 012c §14-17)."""
+    state = ProjectState()
+    record_storage(state, _storage_widgets(project_name="Untitled"), result="estimate-1")
+    assert state.project_configured is False
+
+    record_storage(state, _storage_widgets(project_name="My real project"), result="estimate-2")
+    assert state.project_configured is True
+    # Sticky — a later no-op re-record must not flip it back.
+    record_storage(state, _storage_widgets(project_name="My real project"), result="estimate-3")
+    assert state.project_configured is True
+
+
+def test_project_configured_becomes_true_after_500_sample_demo_profile_style_change():
+    """Reproduces the exact spec 012c §14 bug: loading a full 500-sample
+    profile changes project_revision but historically left
+    storage_config_revision (the old, wrong "configured" signal) at 0
+    forever, since headroom/archive/engineering values are identical
+    between the minimum-valid and full-default states."""
+    state = ProjectState()
+    minimum = _storage_widgets(num_samples=1, retention_years=1.0, project_name="")
+    record_storage(state, minimum, result="estimate-1")
+    assert state.project_configured is False
+
+    demo_profile = _storage_widgets(num_samples=500, retention_years=5.0, project_name="Example WGS Project")
+    record_storage(state, demo_profile, result="estimate-2")
+
+    assert state.project_configured is True
+    assert state.storage_config_revision == 0  # the old (buggy) signal would still say "unconfigured"
+    assert state.project_revision == 1
+
+
+# 5. transfer_valid / INVALID status (spec 012c §11-13, §32) -----------------
+
+
+def test_transfer_valid_starts_true():
+    state = ProjectState()
+    assert state.transfer_valid is True
+
+
+def test_mark_transfer_invalid_does_not_touch_last_good_state():
+    state = ProjectState()
+    record_storage(state, _storage_widgets(), result="estimate")
+    record_transfer(state, "good-plan", {"transfer_measured_mbps": 777.0}, result="good-result")
+
+    mark_transfer_invalid(state)
+
+    assert state.transfer_valid is False
+    assert state.transfer_config == "good-plan"
+    assert state.transfer_widgets == {"transfer_measured_mbps": 777.0}
+    assert state.transfer_result == "good-result"
+
+
+def test_transfer_status_invalid_overrides_complete():
+    state = ProjectState()
+    record_storage(state, _storage_widgets(), result="estimate")
+    record_transfer(state, "plan", {"transfer_measured_mbps": 777.0}, result="result")
+    assert transfer_status(state) == COMPLETE
+
+    mark_transfer_invalid(state)
+    assert transfer_status(state) == INVALID
+
+
+def test_transfer_status_invalid_even_with_no_prior_result():
+    state = ProjectState()
+    mark_transfer_invalid(state)
+    assert transfer_status(state) == INVALID
+
+
+def test_transfer_status_returns_to_complete_after_successful_rerecord():
+    state = ProjectState()
+    record_storage(state, _storage_widgets(), result="estimate")
+    record_transfer(state, "plan-1", {"transfer_measured_mbps": 777.0}, result="result-1")
+    mark_transfer_invalid(state)
+    assert transfer_status(state) == INVALID
+
+    record_transfer(state, "plan-2", {"transfer_measured_mbps": 500.0}, result="result-2")
+    assert transfer_status(state) == COMPLETE

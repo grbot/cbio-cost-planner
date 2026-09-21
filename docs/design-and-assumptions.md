@@ -211,16 +211,61 @@ is only ever *visible* on Project Summary, which reads stored results
 without recomputing — Storage/Compute/Transfer pages themselves need no
 "stale" banners of their own.
 
-**Guided flow** (spec 012a §14-§16): a restrained, text-only status line
-("Storage: Complete · Compute: Complete · Transfer: Needs review · Project
-Summary") appears on Project Summary. There are deliberately no clickable
-"Continue to X" page-jump buttons — implementing them via `st.page_link`
-would require sharing the actual `st.Page` objects `app.py` creates with
-each view module, which cannot be done without a circular import (the
-module defining the pages would need to import the render functions, which
-would need to import it back); the existing top navigation already lets
-users jump to any module freely, and spec 012a itself hedges "where
-appropriate" and warns against fragile custom routing.
+**Explicit `project_configured` flag, not a revision-based inference**
+(spec 012c §14-17, correcting a real bug in the initial 012a
+implementation): Project Summary originally treated
+`storage_config_revision == 0` as "project not yet configured." That
+counter only tracks Storage-only settings (headroom, archive class,
+engineering hours/rate) — not `num_samples`/`project_mode`/
+`retention_years`/`project_name`, which bump `project_revision` instead.
+Since the minimum-valid starting state (§4 above) inherits *all* of the
+demo profile's headroom/archive/engineering values (only overriding name/
+samples/retention), loading the full 500-sample demo profile changed
+`project_revision` but never `storage_config_revision` — so a genuinely
+configured 500-sample (or 1000-sample) project was permanently
+misreported as "the minimum default project." `ProjectState.
+project_configured` is now a separate, explicit, sticky boolean, set
+`True` inside `record_storage()` whenever the incoming Storage widgets
+differ from the previous snapshot in *any* way — including `project_name`
+alone, which affects no calculation and so is deliberately untracked by
+either revision counter.
+
+**Transfer validity is tracked separately from whether a result exists**
+(spec 012c §11-13): `ProjectState.transfer_valid` is `False` only while
+the *current* Transfer widget configuration fails validation (e.g. a
+temporarily-zeroed measured-throughput field), set via `mark_transfer_
+invalid()` in the `TransferPlan` construction's `except ValueError`
+branch — the last valid `transfer_config`/`transfer_widgets`/
+`transfer_result` are left untouched so Project Summary can still show
+them (labelled distinctly from a merely-stale "Needs review" result: "the
+last valid result, not the current (broken) configuration"). `transfer_
+status()` checks this flag first, before existence or staleness — a
+module can never report **Complete** while its current input is broken.
+Also fixed alongside this: `views/transfer.py`'s canonical-widget capture
+no longer filters by `if key in st.session_state` — `sync_widget_defaults`
+already guarantees every key exists by that point, so the filter could
+only ever silently and permanently drop a key from canonical state with no
+way for later healing to recover it.
+
+**Guided flow, completed** (spec 012a §14-§16, completed in spec 012c
+§18-21): a restrained, text-only status line ("1 Storage: Complete · 2
+Compute: Complete · 3 Transfer: Needs review · 4 Project Summary")
+appears on every one of the four pages (`theme.guided_flow_line()`), plus
+a "Continue to X"/"Review Project Summary" `st.page_link` near the bottom
+of Storage/Compute/Transfer. 012a had deferred the page-link buttons,
+reasoning that `st.page_link` requires the real `st.Page` object for
+callable-based pages (confirmed via `help(st.page_link)`) and that sharing
+those objects between `app.py` and each view module looked circular. The
+fix: a new `navigation.py` module defines the four `st.Page` objects,
+importing the view render callables at module load time (exactly like
+`app.py` used to inline); each view's `render()` imports the specific page
+it links to with a **function-local** import inside the function body, not
+at module top level. This resolves without circularity because the
+function-local import only executes once `app.py` has already fully
+imported `navigation.py` — before `st.navigation(...).run()` ever calls a
+page's `render()`. These links are pure convenience; using the existing
+top navigation behaves identically and remains fully available (spec
+012c §19).
 
 **Financial summary** (spec 012a §22-§26): Project Summary presents a
 "Current included total" breakdown (Storage lifecycle + Planned workflow
@@ -231,6 +276,13 @@ Transfer-plan cost, GLnexus). Storage's existing planned-egress assumption
 separately labelled and are never summed together or folded into the
 included total, since they may represent different movements and cost
 ownership/deduplication between them has not been established.
+
+**Route note** (spec 012c §25): the implemented Project Summary route has
+always been `/project-summary` (`navigation.py`'s `SUMMARY_PAGE`,
+`url_path="project-summary"`) — `views/summary.py` is the module's file
+name, unrelated to the URL. No routing change was needed; this is
+documented here only because an earlier spec's own illustrative text used
+`/summary`.
 
 ### WGS 30x template
 

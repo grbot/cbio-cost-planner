@@ -14,7 +14,8 @@ from __future__ import annotations
 import streamlit as st
 
 import theme
-from views import compute, storage, summary, transfer
+from navigation import PAGES
+from views import storage
 
 st.set_page_config(page_title="CBIO Infrastructure Cost Planner", layout="wide")
 theme.header()
@@ -26,10 +27,4 @@ theme.header()
 # session-state bootstrap.
 storage.ensure_project_state()
 
-pages = [
-    st.Page(storage.render, title="Storage", url_path="storage", default=True),
-    st.Page(compute.render, title="Compute", url_path="compute"),
-    st.Page(transfer.render, title="Transfer", url_path="transfer"),
-    st.Page(summary.render, title="Project Summary", url_path="project-summary"),
-]
-st.navigation(pages, position="top").run()
+st.navigation(PAGES, position="top").run()

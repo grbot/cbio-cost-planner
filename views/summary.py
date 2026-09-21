@@ -20,6 +20,7 @@ from cbio_cost.export import STORAGE_CLASS_LABELS
 from cbio_cost.project import PROJECT_SESSION_KEY
 from cbio_cost.project_state import (
     COMPLETE,
+    INVALID,
     NOT_CONFIGURED,
     STATUS_LABELS,
     compute_status,
@@ -32,7 +33,15 @@ from cbio_cost.units import gb_to_tb
 STORAGE_RELATED_LABELS = ("Active S3 storage", "S3/API/lifecycle requests", "Archive storage")
 
 
-def _needs_review_callout(module_label: str) -> None:
+def _needs_review_callout(module_label: str, status: str) -> None:
+    if status == INVALID:
+        theme.callout(
+            "Invalid — showing the last valid result",
+            f"{module_label}'s current input does not currently validate. The figures below are "
+            f"the last valid {module_label} result, not the current (broken) configuration. "
+            f"Revisit {module_label} to fix the input.",
+        )
+        return
     theme.callout(
         "Needs review",
         f"Project inputs changed after this {module_label} estimate was calculated. "
@@ -41,15 +50,17 @@ def _needs_review_callout(module_label: str) -> None:
 
 
 def _guided_flow_line(s_status: str, c_status: str, t_status: str) -> None:
-    # Restrained, text-only guided-flow indicator (spec 012a §14, §16) — no
-    # clickable page-jump buttons (see plan's design decision 5) and no
-    # traffic-light-only colour semantics; the existing top navigation
-    # already lets users jump to any module directly.
-    st.caption(
-        f"Recommended flow — 1 Storage: {STATUS_LABELS[s_status]}  ·  "
-        f"2 Compute: {STATUS_LABELS[c_status]}  ·  "
-        f"3 Transfer: {STATUS_LABELS[t_status]}  ·  "
-        "4 Project Summary"
+    # Restrained, text-only guided-flow indicator (spec 012a §14, §16; page-
+    # level Continue actions added in spec 012c §18-21) — no traffic-light-
+    # only colour semantics; the existing top navigation and the per-page
+    # Continue links both let users jump to any module directly.
+    theme.guided_flow_line(
+        [
+            ("1 Storage", STATUS_LABELS[s_status]),
+            ("2 Compute", STATUS_LABELS[c_status]),
+            ("3 Transfer", STATUS_LABELS[t_status]),
+            ("4 Project Summary", "You are here"),
+        ]
     )
 
 
@@ -73,12 +84,17 @@ def render() -> None:
             )
             return
 
-        # Direct-entry wording (spec 012a §21): a fresh session already has a
-        # minimum-valid project (app.py's bootstrap) — say so explicitly
-        # rather than implying it reflects the user's actual project, and
-        # never call a default-derived figure "last-computed" unless the
-        # user actually visited Storage and configured it themselves.
-        if state.storage_config_revision == 0:
+        # Direct-entry wording (spec 012a §21; fixed in spec 012c §14-17): a
+        # fresh session already has a minimum-valid project (app.py's
+        # bootstrap) — say so explicitly rather than implying it reflects
+        # the user's actual project. Uses the explicit ``project_configured``
+        # flag, not a revision counter — storage_config_revision only tracks
+        # Storage-only settings (headroom/archive/engineering), so a fully
+        # configured 500-sample project that never touched those specific
+        # fields would incorrectly stay at revision 0 forever and be
+        # permanently misreported as unconfigured (the exact bug reproduced
+        # in spec 012c §14).
+        if not state.project_configured:
             theme.callout(
                 "Showing the minimum default project",
                 "This project has not been configured yet — figures below reflect the "
@@ -151,7 +167,7 @@ def render() -> None:
         )
 
         if s_status != COMPLETE:
-            _needs_review_callout("Storage")
+            _needs_review_callout("Storage", s_status)
         st.caption(
             "These figures reflect Storage's last-computed values in this session. "
             "Revisit the Storage page after changing any input to refresh them."
@@ -164,7 +180,7 @@ def render() -> None:
             compute = project.compute_result
             st.markdown("**Compute**")
             if c_status != COMPLETE:
-                _needs_review_callout("Compute")
+                _needs_review_callout("Compute", c_status)
             st.markdown(
                 "Workflow: BWA-MEM2 + CRAM index + DeepVariant  \n"
                 "GLnexus shown but excluded pending benchmark"
@@ -212,7 +228,7 @@ def render() -> None:
             plan = transfer.plan
             st.markdown("**Transfer**")
             if t_status != COMPLETE:
-                _needs_review_callout("Transfer")
+                _needs_review_callout("Transfer", t_status)
             st.markdown(f"{plan.dataset_name}  \n{plan.source.label} → {plan.destination.label}")
             tcol1, tcol2, tcol3 = st.columns(3)
             tcol1.metric("Volume", f"{transfer.size_tb:.2f} TB")

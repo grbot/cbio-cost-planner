@@ -25,7 +25,14 @@ from cbio_cost import export as cost_export
 from cbio_cost.compute_models import ComputeConfig, ComputeResult
 from cbio_cost.evidence import Evidence
 from cbio_cost.project import PROJECT_SESSION_KEY, Project
-from cbio_cost.project_state import get_project_state, record_compute, sync_widget_defaults
+from cbio_cost.project_state import (
+    STATUS_LABELS,
+    get_project_state,
+    record_compute,
+    storage_status,
+    sync_widget_defaults,
+    transfer_status,
+)
 
 WORKFLOW_STEPS = ["FASTQ", "BWA-MEM2", "CRAM", "DeepVariant", "gVCF", "GLnexus", "cohort VCF"]
 WORKFLOW_SUBTITLES: list[str | None] = [None, "modelled", None, "modelled", None, "benchmark pending", None]
@@ -107,6 +114,7 @@ def _runtime_override(config_key: str, benchmark_evidence: Evidence, label: str)
 
 
 def render() -> None:
+    state = get_project_state()
     with st.container(border=True, key="section_compute"):
         theme.section_header(1, "Compute Planning")
         st.caption(
@@ -136,7 +144,15 @@ def render() -> None:
         project_name = project.metadata.name or "Untitled project"
         st.markdown(f"**Project:** {project_name}  \n**Profile:** {num_samples} × 30× WGS")
 
-    state = get_project_state()
+        theme.guided_flow_line(
+            [
+                ("1 Storage", STATUS_LABELS[storage_status(state)]),
+                ("2 Compute", "You are here"),
+                ("3 Transfer", STATUS_LABELS[transfer_status(state)]),
+                ("4 Project Summary", "Overview"),
+            ]
+        )
+
     sync_widget_defaults(state.compute_widgets or _default_state())
 
     # ---------------------------------------------------------------------
@@ -541,6 +557,12 @@ def render() -> None:
             )
 
     st.session_state[PROJECT_SESSION_KEY] = project.with_compute(config, result)
+
+    # Convenience forward action (spec 012c §21) — see navigation.py's
+    # docstring for why this import must be function-local.
+    from navigation import TRANSFER_PAGE
+
+    st.page_link(TRANSFER_PAGE, label="Continue to Transfer →")
 
     theme.disclaimer(
         "Compute planning estimate — validate before budgeting or procurement.",

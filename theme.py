@@ -585,6 +585,17 @@ def section_header(number: int, title: str) -> None:
     )
 
 
+def guided_flow_line(items: list[tuple[str, str]]) -> None:
+    """Compact, restrained, text-only project-flow status line (spec 012c
+    §16, §20) — e.g. "1 Storage: Complete  ·  2 Compute: Needs review". No
+    colour-only status semantics, no wizard/stepper graphic; ``items`` is a
+    list of ``(label, status_text)`` pairs already numbered/labelled by the
+    caller. Framework-agnostic on the ``cbio_cost`` side — callers pass
+    plain strings, keeping this module free of any ``cbio_cost`` import.
+    """
+    st.caption("  ·  ".join(f"{label}: {status}" for label, status in items))
+
+
 def callout(title: str, body: str) -> None:
     """Render a restrained GRO-style callout (slate text, teal left rule)."""
     st.markdown(

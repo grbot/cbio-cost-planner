@@ -25,7 +25,16 @@ from cbio_cost import export as cost_export
 from cbio_cost import transfer_plan
 from cbio_cost.evidence import Evidence
 from cbio_cost.project import PROJECT_SESSION_KEY, Project
-from cbio_cost.project_state import get_project_state, record_transfer, sync_widget_defaults
+from cbio_cost.project_state import (
+    STATUS_LABELS,
+    compute_status,
+    get_project_state,
+    mark_transfer_invalid,
+    record_transfer,
+    storage_status,
+    sync_widget_defaults,
+    transfer_status,
+)
 from cbio_cost.transfer_plan_models import (
     DEFAULT_EFFICIENCY_PERCENT,
     ENDPOINT_TYPES,
@@ -107,6 +116,7 @@ def _evidence_block(label: str, evidence: Evidence | None) -> None:
 
 
 def render() -> None:
+    state = get_project_state()
     with st.container(border=True, key="section_transfer"):
         theme.section_header(1, "Transfer Planning")
         st.caption(
@@ -124,12 +134,20 @@ def render() -> None:
 
         st.markdown(f"**Project:** {project.metadata.name or 'Untitled project'}  \n**Mode:** {project.metadata.project_type}")
 
+        theme.guided_flow_line(
+            [
+                ("1 Storage", STATUS_LABELS[storage_status(state)]),
+                ("2 Compute", STATUS_LABELS[compute_status(state)]),
+                ("3 Transfer", "You are here"),
+                ("4 Project Summary", "Overview"),
+            ]
+        )
+
     presets = transfer_plan.dataset_presets(project)
     preset_names = list(presets.keys())
     dataset_options = preset_names + [CUSTOM_DATASET_LABEL]
     default_choice = preset_names[0] if preset_names else CUSTOM_DATASET_LABEL
 
-    state = get_project_state()
     # Per-key healing every render (spec 012a §8), fixing the reproduced
     # crash (spec 012a §4): previously all transfer_* defaults were gated
     # behind one "transfer_loaded" flag, so if that flag survived but one
@@ -300,18 +318,26 @@ def render() -> None:
             rtt_ms=_dec(st.session_state["transfer_rtt_ms"]) if st.session_state["transfer_rtt_enabled"] else None,
         )
     except ValueError as exc:
+        # Record invalidity without touching the last valid config/result
+        # (spec 012c §11-13, §32) — status must reflect that the *current*
+        # input is broken, not silently keep reporting the old calculation
+        # as current.
+        mark_transfer_invalid(state)
         st.error(f"Invalid input: {exc}")
         st.stop()
+        return  # st.stop() halts a real Streamlit script; explicit for tests/bare mode
 
     pricing = _load_pricing()
     result: TransferPlanResult = transfer_plan.build_transfer_plan_result(plan, pricing)
 
-    transfer_widgets = {
-        key: st.session_state[key]
-        for key in _default_state(default_choice)
-        if key in st.session_state
-    }
-    record_transfer(state, transfer_widgets, result)
+    # Unconditional capture — no "if key in st.session_state" filter (spec
+    # 012c §6): sync_widget_defaults() already guarantees every one of these
+    # keys exists by this point, so a filter here could only ever silently
+    # and permanently drop a key from canonical state with no way for later
+    # healing to recover it (a canonical state with a hole stays full of
+    # holes, since healing only ever fills gaps *from* canonical state).
+    transfer_widgets = {key: st.session_state[key] for key in _default_state(default_choice)}
+    record_transfer(state, plan, transfer_widgets, result)
 
     # ---------------------------------------------------------------------
     # 6. Transfer estimate
@@ -427,6 +453,12 @@ def render() -> None:
             )
 
     st.session_state[PROJECT_SESSION_KEY] = project.with_transfer(plan, result)
+
+    # Convenience forward action (spec 012c §21) — see navigation.py's
+    # docstring for why this import must be function-local.
+    from navigation import SUMMARY_PAGE
+
+    st.page_link(SUMMARY_PAGE, label="Review Project Summary →")
 
     theme.disclaimer(
         "Transfer planning estimate — validate before budgeting or scheduling.",

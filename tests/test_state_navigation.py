@@ -9,12 +9,15 @@ defects this spec fixes).
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 import streamlit as st
 
+from cbio_cost import export as cost_export
 from cbio_cost.project_state import (
     COMPLETE,
+    INVALID,
     NEEDS_REVIEW,
     compute_status,
     get_project_state,
@@ -269,3 +272,180 @@ def test_storage_heals_missing_custom_project_dataset_widgets():
     assert st.session_state["custom_name_1"] == "Dataset 1"
     # 1.0 TB (the default custom-dataset size/unit) expressed in GB.
     assert st.session_state["custom_size_1"] == 1024.0
+
+
+# 6. Transfer configuration persistence and validity (spec 012c) ------------
+
+
+def _round_trip_away_from_transfer_and_back() -> None:
+    summary.render()
+    storage.render()
+    compute.render()
+    transfer.render()
+
+
+def test_transfer_measured_throughput_survives_round_trip():
+    """spec 012c §5, §8: the exact reported defect — 777 must not reset to
+    0.00 after navigating away from Transfer and back."""
+    st.session_state.clear()
+    _configure_reviewed_scenario()  # measured mode, 777 Mbps
+
+    _round_trip_away_from_transfer_and_back()
+
+    assert st.session_state["transfer_measured_mbps"] == 777.0
+    assert st.session_state["transfer_throughput_mode"] == "measured"
+    state = get_project_state()
+    assert transfer_status(state) == COMPLETE
+    assert state.transfer_result.duration_hours is not None
+
+
+def test_transfer_known_capacity_mode_survives_round_trip():
+    """spec 012c §9: distinctive known-capacity values (not just measured)."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_throughput_mode": "known_capacity",
+            "transfer_link_capacity_mbps": 2500.0,
+            "transfer_efficiency_percent": 63.0,
+        }
+    )
+    transfer.render()
+
+    _round_trip_away_from_transfer_and_back()
+
+    assert st.session_state["transfer_throughput_mode"] == "known_capacity"
+    assert st.session_state["transfer_link_capacity_mbps"] == 2500.0
+    assert st.session_state["transfer_efficiency_percent"] == 63.0
+    state = get_project_state()
+    assert transfer_status(state) == COMPLETE
+    assert state.transfer_result.throughput.effective_mbps == Decimal("1575.00")
+
+
+def test_transfer_unknown_mode_survives_round_trip():
+    """spec 012c §9: unknown mode and its scenario table survive too."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.render()
+    st.session_state["transfer_throughput_mode"] = "unknown"
+    transfer.render()
+
+    _round_trip_away_from_transfer_and_back()
+
+    assert st.session_state["transfer_throughput_mode"] == "unknown"
+    state = get_project_state()
+    assert transfer_status(state) == COMPLETE
+    assert len(state.transfer_result.scenarios) > 0
+
+
+def test_transfer_distinctive_optional_fields_survive_round_trip():
+    """spec 012c §10, §35: every currently-supported optional field, with
+    distinctive values, round-tripped through every page."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_source_type": "institutional",
+            "transfer_source_location": "Cape Town",
+            "transfer_destination_type": "aws_s3",
+            "transfer_destination_location": "Cape Town AWS region",
+            "transfer_throughput_mode": "measured",
+            "transfer_measured_mbps": 777.0,
+            "transfer_method": "Globus",
+            "transfer_rtt_enabled": True,
+            "transfer_rtt_ms": 37.0,
+        }
+    )
+    transfer.render()
+
+    _round_trip_away_from_transfer_and_back()
+
+    assert st.session_state["transfer_source_location"] == "Cape Town"
+    assert st.session_state["transfer_destination_location"] == "Cape Town AWS region"
+    assert st.session_state["transfer_method"] == "Globus"
+    assert st.session_state["transfer_rtt_enabled"] is True
+    assert st.session_state["transfer_rtt_ms"] == 37.0
+    state = get_project_state()
+    assert transfer_status(state) == COMPLETE
+    assert state.transfer_result.bdp is not None
+    assert state.transfer_result.bdp.rtt_ms == Decimal("37.0")
+
+
+def test_transfer_export_uses_canonical_configuration_after_round_trip():
+    """spec 012c §33: exported configuration must reflect the originally
+    configured values, not anything reset by intervening navigation."""
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    _round_trip_away_from_transfer_and_back()
+
+    state = get_project_state()
+    payload = cost_export.transfer_plan_to_json("Test project", state.transfer_result)
+    data = json.loads(payload)
+    assert data["dataset_name"] == "FASTQ"
+    assert data["throughput_mode"] == "measured"
+    assert data["measured_throughput_mbps"] == "777.0"
+
+
+def test_transfer_invalid_current_input_does_not_report_complete():
+    """spec 012c §11-13, §32: a temporarily-broken current input must never
+    be reported as Complete, and must not erase the last valid result."""
+    st.session_state.clear()
+    _configure_reviewed_scenario()  # valid measured/777 configuration
+    state = get_project_state()
+    assert transfer_status(state) == COMPLETE
+    good_result = state.transfer_result
+
+    st.session_state["transfer_measured_mbps"] = 0.0
+    transfer.render()
+
+    assert transfer_status(state) == INVALID
+    # Last good config/result must still be available, untouched.
+    assert state.transfer_result is good_result
+    assert state.transfer_config.measured_mbps == Decimal("777.0")
+
+
+def test_transfer_recovers_to_complete_after_fixing_invalid_input():
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    state = get_project_state()
+
+    st.session_state["transfer_measured_mbps"] = 0.0
+    transfer.render()
+    assert transfer_status(state) == INVALID
+
+    st.session_state["transfer_measured_mbps"] = 500.0
+    transfer.render()
+    assert transfer_status(state) == COMPLETE
+
+
+# 7. project_configured detection (spec 012c §14-17) -------------------------
+
+
+def test_fresh_session_is_not_configured():
+    st.session_state.clear()
+    storage.ensure_project_state()
+    state = get_project_state()
+    assert state.project_configured is False
+
+
+def test_500_sample_reviewed_scenario_is_configured():
+    """Reproduces the exact spec 012c §14 bug reproduction: a genuinely
+    configured 500-sample project must not be reported as the minimum
+    default project."""
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    state = get_project_state()
+    assert state.project_configured is True
+
+
+def test_1000_sample_reconfiguration_remains_configured():
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    st.session_state["num_samples"] = 1000
+    storage.render()
+    state = get_project_state()
+    assert state.project_configured is True
