@@ -32,7 +32,7 @@ from typing import Any
 
 import streamlit as st
 
-from cbio_cost.compute_models import ComputeResult
+from cbio_cost.compute_models import ComputeConfig, ComputeResult
 from cbio_cost.models import CostEstimate
 from cbio_cost.transfer_plan_models import TransferPlan, TransferPlanResult
 
@@ -87,6 +87,7 @@ class ProjectState:
     storage_widgets: dict[str, Any] = field(default_factory=dict)
     compute_widgets: dict[str, Any] = field(default_factory=dict)
     transfer_widgets: dict[str, Any] = field(default_factory=dict)
+    compute_config: ComputeConfig | None = None
     transfer_config: TransferPlan | None = None
 
     storage_result: CostEstimate | None = None
@@ -156,11 +157,14 @@ def record_storage(state: ProjectState, widgets: dict[str, Any], result: CostEst
     state.storage_calculated_for = (state.project_revision, state.storage_config_revision)
 
 
-def record_compute(state: ProjectState, widgets: dict[str, Any], result: ComputeResult) -> None:
+def record_compute(
+    state: ProjectState, config: ComputeConfig, widgets: dict[str, Any], result: ComputeResult
+) -> None:
     old = state.compute_widgets
     if old and old != widgets:
         state.compute_config_revision += 1
     state.compute_widgets = dict(widgets)
+    state.compute_config = config
     state.compute_result = result
     state.compute_calculated_for = (state.project_revision, state.compute_config_revision)
 
@@ -212,6 +216,25 @@ def transfer_status(state: ProjectState) -> str:
     if state.transfer_calculated_for != (state.project_revision, state.transfer_config_revision):
         return NEEDS_REVIEW
     return COMPLETE
+
+
+_MODULE_STATUS_FUNCTIONS = {
+    "storage": storage_status,
+    "compute": compute_status,
+    "transfer": transfer_status,
+}
+
+
+def get_module_status(state: ProjectState, module: str) -> str:
+    """Single named dispatch point (spec 013 §29, §92) for
+    ``storage_status``/``compute_status``/``transfer_status`` — pure,
+    mutates nothing, and every page/module already goes through one of
+    those three, so this exists to give the module-status concept one
+    citable name rather than to change any call site's behaviour."""
+    try:
+        return _MODULE_STATUS_FUNCTIONS[module](state)
+    except KeyError:
+        raise ValueError(f"Unknown module '{module}'") from None
 
 
 STATUS_LABELS = {

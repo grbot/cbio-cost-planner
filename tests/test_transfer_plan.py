@@ -24,7 +24,8 @@ import pytest
 
 from cbio_cost.calculator import build_estimate
 from cbio_cost.config import build_wgs_datasets, load_currency_defaults, load_pricing, load_profiles
-from cbio_cost.project import Project
+from cbio_cost.project import build_project
+from cbio_cost.project_state import ProjectState, record_storage
 from cbio_cost.transfer_plan import (
     bandwidth_delay_product_bytes,
     dataset_presets,
@@ -93,7 +94,9 @@ def test_wgs_fastq_preset_matches_500_sample_regression(pricing):
     )
     currency = load_currency_defaults(CONFIG_DIR / "aws-pricing.yaml")
     estimate = build_estimate(profile.project, datasets, profile.engineering, pricing, currency)
-    project = Project.from_storage(profile.project, datasets, estimate)
+    state = ProjectState()
+    record_storage(state, {}, estimate)
+    project = build_project(state)
 
     presets = dataset_presets(project)
 

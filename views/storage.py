@@ -38,7 +38,7 @@ from cbio_cost.models import (
     ScenarioAssumptions,
     WgsMovementAssumptions,
 )
-from cbio_cost.project import PROJECT_SESSION_KEY, Project
+from cbio_cost.project import PROJECT_SESSION_KEY, Project, build_project
 from cbio_cost.project_state import (
     STATUS_LABELS,
     compute_status,
@@ -296,7 +296,7 @@ def _build_project_from_session_state() -> Project:
     state = get_project_state()
     record_storage(state, _current_storage_widgets(datasets), estimate)
 
-    return Project.from_storage(inputs, datasets, estimate)
+    return build_project(state)
 
 
 def ensure_project_state() -> None:
@@ -682,16 +682,18 @@ def render() -> None:
         estimate = build_estimate(inputs, datasets, engineering, pricing, currency)
         estimate.explanation = explain_result(estimate)
 
-        # Shared project model (spec 010 §4): make this project's identity and
-        # Storage result available to other modules (Project Summary today;
-        # Compute/Transfer later) without them re-deriving it.
-        st.session_state[PROJECT_SESSION_KEY] = Project.from_storage(inputs, datasets, estimate)
-
         # Canonical project state (spec 012a §6): record this result against
         # the current widget configuration, bumping revisions only where an
         # actual value changed, so Project Summary can later tell whether
         # this (or any other module's) result is still current.
         record_storage(state, _current_storage_widgets(datasets), estimate)
+
+        # Shared project model (spec 010 §4, spec 013 §2/§8/§40-41): a pure
+        # projection of ProjectState, built fresh here (never mutated
+        # incrementally) so Compute/Transfer attachments already recorded in
+        # ProjectState survive a Storage re-render regardless of navigation
+        # order.
+        st.session_state[PROJECT_SESSION_KEY] = build_project(state)
 
         # Sensitivity scenarios (spec 006 §19): built from the *current* (possibly
         # edited) datasets, varying only movement behaviour and contingency.

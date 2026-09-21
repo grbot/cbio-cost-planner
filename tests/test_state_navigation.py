@@ -15,11 +15,13 @@ from decimal import Decimal
 import streamlit as st
 
 from cbio_cost import export as cost_export
+from cbio_cost.project import build_project
 from cbio_cost.project_state import (
     COMPLETE,
     INVALID,
     NEEDS_REVIEW,
     compute_status,
+    get_module_status,
     get_project_state,
     storage_status,
     transfer_status,
@@ -708,3 +710,295 @@ def test_transfer_rtt_value_survives_disable_and_reenable_with_key_deletion():
     transfer.render()
 
     assert st.session_state["transfer_rtt_ms"] == 137.0
+
+
+# 9. Canonical project-state architecture (spec 013) -------------------------
+#
+# 013's central complaint: project state must not depend on which page most
+# recently rendered. One real, reproduced defect was found: views/storage.py
+# used to bare-construct a fresh Project on every Storage render (via
+# Project.from_storage()), discarding whatever compute_result/transfer_result
+# a prior Compute/Transfer render had attached -- so navigating Storage ->
+# Project Summary (skipping Compute/Transfer) made Summary wrongly hide fully
+# current, valid Compute/Transfer results. Fixed by cbio_cost.project.
+# build_project(state): a pure, total projection of ProjectState, called
+# fresh by every page instead of incrementally mutating a cached Project.
+
+
+def test_storage_then_summary_does_not_hide_current_compute_and_transfer():
+    """Regression pin for the confirmed spec 013 bug: Storage -> Project
+    Summary (skipping Compute/Transfer entirely) must still show Compute/
+    Transfer as current, not as "not configured"."""
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    state = get_project_state()
+
+    storage.render()  # revisit Storage only -- no Compute/Transfer revisit
+
+    project = build_project(state)
+    assert project.compute_result is not None
+    assert project.transfer_result is not None
+    assert compute_status(state) == COMPLETE
+    assert transfer_status(state) == COMPLETE
+
+    summary.render()  # must not raise, must not silently disagree with the above
+
+
+def test_get_module_status_dispatches_to_the_same_pure_status_functions():
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    state = get_project_state()
+
+    assert get_module_status(state, "storage") == storage_status(state) == COMPLETE
+    assert get_module_status(state, "compute") == compute_status(state) == COMPLETE
+    assert get_module_status(state, "transfer") == transfer_status(state) == COMPLETE
+
+
+# 9a. Pairwise navigation orders (spec 013 §26) -------------------------------
+
+
+def test_storage_transfer_storage_preserves_configuration():
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    before = {k: st.session_state.get(k) for k in TRACKED_KEYS}
+
+    storage.render()
+    transfer.render()
+    storage.render()
+
+    after = {k: st.session_state.get(k) for k in TRACKED_KEYS}
+    assert after == before
+
+
+def test_storage_summary_storage_preserves_configuration():
+    """Skips Compute/Transfer entirely -- the exact order that exposed the
+    Project-snapshot bug fixed above."""
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    before = {k: st.session_state.get(k) for k in TRACKED_KEYS}
+    state = get_project_state()
+
+    storage.render()
+    summary.render()
+    storage.render()
+
+    after = {k: st.session_state.get(k) for k in TRACKED_KEYS}
+    assert after == before
+    assert compute_status(state) == COMPLETE
+    assert transfer_status(state) == COMPLETE
+
+
+def test_transfer_compute_transfer_preserves_configuration():
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    before = {k: st.session_state.get(k) for k in TRACKED_KEYS}
+
+    transfer.render()
+    compute.render()
+    transfer.render()
+
+    after = {k: st.session_state.get(k) for k in TRACKED_KEYS}
+    assert after == before
+
+
+def test_compute_summary_compute_preserves_configuration():
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    before = {k: st.session_state.get(k) for k in TRACKED_KEYS}
+
+    compute.render()
+    summary.render()
+    compute.render()
+
+    after = {k: st.session_state.get(k) for k in TRACKED_KEYS}
+    assert after == before
+
+
+# 9b. Render idempotence (spec 013 §9, §66) -----------------------------------
+
+
+def test_storage_render_without_edits_does_not_bump_revisions():
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    state = get_project_state()
+    before = (state.project_revision, state.storage_config_revision, dict(state.storage_widgets))
+
+    storage.render()
+    storage.render()
+
+    after = (state.project_revision, state.storage_config_revision, dict(state.storage_widgets))
+    assert after == before
+
+
+def test_compute_render_without_edits_does_not_bump_revision():
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    state = get_project_state()
+    before = (state.compute_config_revision, dict(state.compute_widgets))
+
+    compute.render()
+    compute.render()
+
+    after = (state.compute_config_revision, dict(state.compute_widgets))
+    assert after == before
+
+
+def test_transfer_render_without_edits_does_not_bump_revision():
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    state = get_project_state()
+    before = (state.transfer_config_revision, dict(state.transfer_widgets))
+
+    transfer.render()
+    transfer.render()
+
+    after = (state.transfer_config_revision, dict(state.transfer_widgets))
+    assert after == before
+
+
+def test_summary_render_is_read_only():
+    """spec 013 §40, §71: rendering Summary must not mutate ProjectState at
+    all -- not config, not results, not revisions."""
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    state = get_project_state()
+    before = dict(vars(state))
+
+    summary.render()
+    summary.render()
+
+    after = dict(vars(state))
+    assert after == before
+
+
+# 9c. Compute widget-key-deletion persistence (spec 013 §63) ------------------
+
+
+def test_compute_fields_survive_widget_key_deletion():
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.render()
+    st.session_state.update(
+        {
+            "compute_alignment_concurrency": 7,
+            "compute_deepvariant_concurrency": 13,
+            "compute_scratch_gib_per_worker": 333.0,
+            "compute_alignment_override_enabled": True,
+            "compute_alignment_override_hours": 12.5,
+            "compute_deepvariant_override_enabled": True,
+            "compute_deepvariant_override_hours": 8.5,
+        }
+    )
+    compute.render()
+
+    _delete_keys(
+        "compute_alignment_concurrency",
+        "compute_deepvariant_concurrency",
+        "compute_scratch_gib_per_worker",
+        "compute_alignment_override_enabled",
+        "compute_alignment_override_hours",
+        "compute_deepvariant_override_enabled",
+        "compute_deepvariant_override_hours",
+    )
+    summary.render()
+    storage.render()
+    transfer.render()
+    compute.render()
+
+    assert st.session_state["compute_alignment_concurrency"] == 7
+    assert st.session_state["compute_deepvariant_concurrency"] == 13
+    assert st.session_state["compute_scratch_gib_per_worker"] == 333.0
+    assert st.session_state["compute_alignment_override_enabled"] is True
+    assert st.session_state["compute_alignment_override_hours"] == 12.5
+    assert st.session_state["compute_deepvariant_override_enabled"] is True
+    assert st.session_state["compute_deepvariant_override_hours"] == 8.5
+    state = get_project_state()
+    assert compute_status(state) == COMPLETE
+
+
+# 9d. Full-field Storage round trip with distinctive values (spec 013 §22, §62)
+
+DISTINCTIVE_STORAGE_FIELDS = {
+    "project_name": "013 distinctive project",
+    "num_samples": 437,
+    "retention_years": 4.25,
+    "vol_FASTQ": 123.0,
+    "vol_CRAM": 55.0,
+    "vol_gVCF": 17.0,
+    "archive_FASTQ": "glacier_instant",
+    "archive_CRAM": "glacier_deep_archive",
+    "archive_gVCF": "s3_standard",
+    "headroom_percent": 33.0,
+    "fastq_passes": 3.0,
+    "cram_retrieval_percent": 44.0,
+    "cram_retrieval_passes": 2.0,
+    "gvcf_passes": 5.0,
+    "active_months": 7.0,
+    "transfer_contingency_percent": 31.0,
+    "onboarding_hours": 19.0,
+    "operations_hours_per_year": 29.0,
+    "closeout_hours": 11.0,
+    "hourly_rate_zar": 1234.0,
+    "usd_zar": 17.77,
+    "vat_percent": 16.5,
+}
+
+
+def test_full_distinctive_storage_configuration_survives_round_trip():
+    st.session_state.clear()
+    storage.ensure_project_state()
+    st.session_state.update(DISTINCTIVE_STORAGE_FIELDS)
+    storage.render()
+
+    compute.render()
+    transfer.render()
+    summary.render()
+    storage.render()
+    compute.render()
+    transfer.render()
+    summary.render()
+
+    for key, value in DISTINCTIVE_STORAGE_FIELDS.items():
+        assert st.session_state[key] == value, key
+
+
+def test_full_distinctive_storage_configuration_survives_widget_key_deletion():
+    st.session_state.clear()
+    storage.ensure_project_state()
+    st.session_state.update(DISTINCTIVE_STORAGE_FIELDS)
+    storage.render()
+
+    _delete_keys(*DISTINCTIVE_STORAGE_FIELDS.keys())
+    compute.render()
+    transfer.render()
+    summary.render()
+    storage.render()
+
+    for key, value in DISTINCTIVE_STORAGE_FIELDS.items():
+        assert st.session_state[key] == value, key
+
+
+# 9e. No mixed revisions (spec 013 §72) ---------------------------------------
+
+
+def test_summary_never_presents_stale_compute_or_transfer_as_current():
+    st.session_state.clear()
+    _configure_reviewed_scenario()
+    state = get_project_state()
+
+    st.session_state["num_samples"] = 1000
+    storage.render()  # Storage current for 1000; Compute/Transfer still stamped for 500
+
+    assert storage_status(state) == COMPLETE
+    assert compute_status(state) == NEEDS_REVIEW
+    assert transfer_status(state) == NEEDS_REVIEW
+
+    project = build_project(state)
+    # The stale results must still be retrievable (so Summary can show them
+    # labelled "Needs review"), but never reported as COMPLETE.
+    assert project.compute_result is not None
+    assert project.transfer_result is not None
+
+    summary.render()  # must not raise, must not silently upgrade either to Complete
+    assert compute_status(state) == NEEDS_REVIEW
+    assert transfer_status(state) == NEEDS_REVIEW

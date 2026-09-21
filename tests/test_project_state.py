@@ -71,8 +71,8 @@ def test_num_samples_change_bumps_project_revision_only():
 def test_compute_only_widget_change_bumps_compute_config_revision_only():
     state = ProjectState()
     record_storage(state, _storage_widgets(), result="estimate")
-    record_compute(state, {"compute_alignment_concurrency": 10}, result="compute-1")
-    record_compute(state, {"compute_alignment_concurrency": 20}, result="compute-2")
+    record_compute(state, config="config-1", widgets={"compute_alignment_concurrency": 10}, result="compute-1")
+    record_compute(state, config="config-2", widgets={"compute_alignment_concurrency": 20}, result="compute-2")
 
     assert state.compute_config_revision == 1
     assert state.project_revision == 0
@@ -145,7 +145,7 @@ def test_status_complete_after_record():
 def test_status_needs_review_after_upstream_change_without_rerecording():
     state = ProjectState()
     record_storage(state, _storage_widgets(num_samples=500), result="estimate-1")
-    record_compute(state, {"compute_alignment_concurrency": 10}, result="compute-1")
+    record_compute(state, config="config-1", widgets={"compute_alignment_concurrency": 10}, result="compute-1")
     assert compute_status(state) == COMPLETE
 
     # Sample count changes (Storage re-recorded); Compute is not revisited.
@@ -157,11 +157,11 @@ def test_status_needs_review_after_upstream_change_without_rerecording():
 def test_status_returns_to_complete_after_rerecording_stale_module():
     state = ProjectState()
     record_storage(state, _storage_widgets(num_samples=500), result="estimate-1")
-    record_compute(state, {"compute_alignment_concurrency": 10}, result="compute-1")
+    record_compute(state, config="config-1", widgets={"compute_alignment_concurrency": 10}, result="compute-1")
     record_storage(state, _storage_widgets(num_samples=1000), result="estimate-2")
     assert compute_status(state) == NEEDS_REVIEW
 
-    record_compute(state, {"compute_alignment_concurrency": 10}, result="compute-2")
+    record_compute(state, config="config-2", widgets={"compute_alignment_concurrency": 10}, result="compute-2")
     assert compute_status(state) == COMPLETE
 
 

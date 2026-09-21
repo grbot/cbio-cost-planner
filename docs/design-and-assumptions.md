@@ -281,6 +281,81 @@ reads (rather than relying solely on the one at the top of `render()`)
 closes any remaining window between key removal and use. No visible
 layout changed.
 
+### Canonical project-state architecture closure (spec 013)
+
+A deliberately conservative architecture-correction pass, prompted by
+012a/012c/012d repeatedly needing to re-litigate whether project state
+depended on Streamlit widget lifecycle or page-render order. Inspection
+(reading every state-owning file plus running the real `render()`
+pipeline directly, not just reading the code) found that most of the
+architectural properties spec 013 asks for already held, inherited from
+012a-012d: one canonical `ProjectState` per session
+(`cbio_cost/project_state.py`); configuration (`*_widgets` dicts,
+`transfer_config`) already separate from results (`*_result` objects);
+module status already pure and derived (`storage_status`/`compute_status`/
+`transfer_status`), consumed identically by all four pages; a page
+revisiting its own module already cannot create staleness in another
+module (`record_compute`/`record_transfer` only ever bump their own
+revision counter); `cbio_cost/export.py` already reads only passed-in
+typed objects, never `st.session_state`.
+
+**One genuine, currently-live bug was found and fixed**: `views/storage.py`
+used to bare-construct a fresh `cbio_cost.project.Project` via
+`Project.from_storage(...)` on every Storage render, discarding whatever
+`compute_result`/`transfer_result` a prior Compute/Transfer render had
+attached via `with_compute()`/`with_transfer()` — `ProjectState` (the real
+canonical store) was unaffected, but the cached `Project` *read-model*
+object in `st.session_state["project"]` lost those attachments. Since
+`views/summary.py` gates whether it renders the Compute/Transfer sections
+at all on `project.compute_result is not None`/`project.transfer_result is
+not None`, any navigation ending at Storage before Summary (e.g. Storage →
+Project Summary, skipping Compute/Transfer — a sequence spec 013 §26
+explicitly names) made Summary wrongly hide fully current, valid Compute/
+Transfer results, while the flow-indicator line on the same page (driven
+directly by `ProjectState`) correctly still reported them `Complete` — a
+direct, user-visible self-contradiction. No existing test caught this
+because every prior round-trip test happened to visit Compute/Transfer
+before Summary in each cycle.
+
+Fixed by replacing the incremental-mutation pattern with
+`cbio_cost.project.build_project(state)` — a pure, total projection of
+`ProjectState` into a `Project`, safe to call from any page in any
+navigation order (`Project.from_storage`/`with_compute`/`with_transfer`
+were removed; nothing else used them). `ProjectState` gained a
+`compute_config` field (parity with the pre-existing `transfer_config`) so
+`build_project()` never needs anything but canonical state.
+`cbio_cost.project_state.get_module_status(state, module)` was added as a
+single named dispatch point over `storage_status`/`compute_status`/
+`transfer_status` (spec 013 §29), which remain the actual implementation.
+
+**Two scope decisions, deliberate rather than partial compliance:**
+widget key names were **not** renamed to a distinct `ui_*` namespace —
+spec 013 §7 itself says "the naming convention is flexible... the
+separation is not," and the separation already holds structurally
+(`ProjectState.*_widgets` are distinct Python dict objects from
+`st.session_state`, healed one-directionally via `sync_widget_defaults`,
+never the same storage location); and `storage_widgets`/`compute_widgets`/
+`transfer_widgets` remain flat dicts rather than nested dataclasses —
+spec 013 §3 explicitly permits "typed dictionaries... existing project
+models," and the calculation-engine layer already supplies the typed
+config objects (`ProjectInputs`, `Dataset`, `ComputeConfig`,
+`TransferPlan`) that matter for correctness. Both would be substantial,
+purely cosmetic, high-churn renames with no behavioural fix behind them.
+
+**State inventory** (spec 013 §58):
+
+| State | Canonical? | Derived? | UI-only? | Owner |
+|---|---|---|---|---|
+| Storage/Compute/Transfer config (widget-shaped) | Yes | No | No | `ProjectState.{storage,compute,transfer}_widgets` |
+| Compute/Transfer built config object | Yes | No | No | `ProjectState.{compute,transfer}_config` |
+| Storage/Compute/Transfer result | No | Yes | No | `ProjectState.{storage,compute,transfer}_result` |
+| Revision counters / `calculated_for` stamps | Yes / derived-at-record-time | — | No | `ProjectState` |
+| `project_configured` / `transfer_valid` flags | Yes | No | No | `ProjectState` |
+| Module status | No | Yes | No | `get_module_status()` / `storage_status`/`compute_status`/`transfer_status` |
+| `Project`/`ProjectMetadata` read-model | No | Yes | No | `build_project(state)` |
+| Streamlit widget keys | No | No | Yes | `st.session_state`, healed via `sync_widget_defaults` |
+| Custom-dataset bookkeeping (`custom_dataset_ids`, `custom_next_id`) | No | No | Yes | `st.session_state` — resolved into canonical `custom_datasets` on capture |
+
 **Guided flow, completed** (spec 012a §14-§16, completed in spec 012c
 §18-21): a restrained, text-only status line ("1 Storage: Complete · 2
 Compute: Complete · 3 Transfer: Needs review · 4 Project Summary")

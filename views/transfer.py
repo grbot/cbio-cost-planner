@@ -24,7 +24,7 @@ from cbio_cost import config as cost_config
 from cbio_cost import export as cost_export
 from cbio_cost import transfer_plan
 from cbio_cost.evidence import Evidence
-from cbio_cost.project import PROJECT_SESSION_KEY, Project
+from cbio_cost.project import PROJECT_SESSION_KEY, Project, build_project
 from cbio_cost.project_state import (
     STATUS_LABELS,
     compute_status,
@@ -128,7 +128,7 @@ def render() -> None:
             "one endpoint-to-endpoint leg of the current project."
         )
 
-        project: Project | None = st.session_state.get(PROJECT_SESSION_KEY)
+        project: Project | None = build_project(state)
         if project is None:
             theme.callout(
                 "Project required",
@@ -471,7 +471,7 @@ def render() -> None:
                 mime="text/markdown",
             )
 
-    st.session_state[PROJECT_SESSION_KEY] = project.with_transfer(plan, result)
+    st.session_state[PROJECT_SESSION_KEY] = build_project(state)
 
     # Convenience forward action (spec 012c §21) — see navigation.py's
     # docstring for why this import must be function-local.

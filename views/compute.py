@@ -24,7 +24,7 @@ from cbio_cost import compute_benchmarks as bm
 from cbio_cost import export as cost_export
 from cbio_cost.compute_models import ComputeConfig, ComputeResult
 from cbio_cost.evidence import Evidence
-from cbio_cost.project import PROJECT_SESSION_KEY, Project
+from cbio_cost.project import PROJECT_SESSION_KEY, Project, build_project
 from cbio_cost.project_state import (
     STATUS_LABELS,
     get_project_state,
@@ -123,7 +123,7 @@ def render() -> None:
             "planning assumptions."
         )
 
-        project: Project | None = st.session_state.get(PROJECT_SESSION_KEY)
+        project: Project | None = build_project(state)
         is_wgs = (
             project is not None
             and project.metadata.project_type == "WGS 30x"
@@ -307,7 +307,7 @@ def render() -> None:
     # 012a §37 currency-invalidation requirement).
     usd_zar = _dec(state.storage_widgets.get("usd_zar", FALLBACK_USD_ZAR))
     result: ComputeResult = compute_engine.build_compute_result(num_samples, config, usd_zar)
-    record_compute(state, compute_widgets, result)
+    record_compute(state, config, compute_widgets, result)
 
     # ---------------------------------------------------------------------
     # 5. Workflow stages
@@ -556,7 +556,7 @@ def render() -> None:
                 mime="text/markdown",
             )
 
-    st.session_state[PROJECT_SESSION_KEY] = project.with_compute(config, result)
+    st.session_state[PROJECT_SESSION_KEY] = build_project(state)
 
     # Convenience forward action (spec 012c §21) — see navigation.py's
     # docstring for why this import must be function-local.

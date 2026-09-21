@@ -17,7 +17,7 @@ import streamlit as st
 
 import theme
 from cbio_cost.export import STORAGE_CLASS_LABELS
-from cbio_cost.project import PROJECT_SESSION_KEY
+from cbio_cost.project import build_project
 from cbio_cost.project_state import (
     COMPLETE,
     INVALID,
@@ -69,7 +69,7 @@ def render() -> None:
         theme.section_header(1, "Project Summary")
 
         state = get_project_state()
-        project = st.session_state.get(PROJECT_SESSION_KEY)
+        project = build_project(state)
         s_status = storage_status(state)
         c_status = compute_status(state)
         t_status = transfer_status(state)

@@ -11,7 +11,8 @@ import streamlit as st
 
 from cbio_cost.calculator import build_estimate
 from cbio_cost.config import build_wgs_datasets, load_currency_defaults, load_pricing, load_profiles
-from cbio_cost.project import PROJECT_SESSION_KEY, Project, ProjectMetadata
+from cbio_cost.project import PROJECT_SESSION_KEY, ProjectMetadata, build_project
+from cbio_cost.project_state import ProjectState, record_storage, record_transfer
 from cbio_cost.transfer_plan import build_transfer_plan_result
 from cbio_cost.transfer_plan_models import Endpoint, TransferPlan
 from views import storage
@@ -43,8 +44,10 @@ def estimate(profile, wgs_datasets, pricing):
     return build_estimate(profile.project, wgs_datasets, profile.engineering, pricing, currency)
 
 
-def test_project_from_storage_wraps_inputs_datasets_and_estimate(profile, wgs_datasets, estimate):
-    project = Project.from_storage(profile.project, wgs_datasets, estimate)
+def test_build_project_wraps_inputs_datasets_and_estimate(profile, wgs_datasets, estimate):
+    state = ProjectState()
+    record_storage(state, {}, estimate)
+    project = build_project(state)
 
     assert project.metadata == ProjectMetadata(
         name=profile.project.project_name,
@@ -56,10 +59,13 @@ def test_project_from_storage_wraps_inputs_datasets_and_estimate(profile, wgs_da
     assert project.storage_estimate is estimate
 
 
-def test_project_from_storage_does_not_alter_calculated_figures(profile, wgs_datasets, estimate):
-    """Wrapping a CostEstimate into a Project must not recompute or change any
-    figure — it is a structural bridge only (spec 010 §4)."""
-    project = Project.from_storage(profile.project, wgs_datasets, estimate)
+def test_build_project_does_not_alter_calculated_figures(profile, wgs_datasets, estimate):
+    """Projecting a CostEstimate into a Project must not recompute or change
+    any figure — it is a pure structural bridge only (spec 010 §4, spec 013
+    §2, §8)."""
+    state = ProjectState()
+    record_storage(state, {}, estimate)
+    project = build_project(state)
 
     assert project.storage_estimate.volume.raw_total_gb == estimate.volume.raw_total_gb
     assert project.storage_estimate.grand_total_zar == estimate.grand_total_zar
@@ -73,11 +79,16 @@ def test_project_metadata_custom_project_has_no_sample_count():
     assert metadata.num_samples is None
 
 
-def test_with_transfer_attaches_config_and_result_without_touching_other_fields(profile, wgs_datasets, estimate, pricing):
-    """spec 012: Project.with_transfer() attaches Transfer config/result the
-    same way with_compute() does, without recomputing or disturbing Storage
-    or Compute state."""
-    project = Project.from_storage(profile.project, wgs_datasets, estimate)
+def test_build_project_attaches_transfer_config_and_result_without_touching_storage(
+    profile, wgs_datasets, estimate, pricing
+):
+    """spec 012, spec 013 §2: build_project() attaches Transfer config/result
+    from canonical ProjectState without recomputing or disturbing Storage or
+    Compute state."""
+    state = ProjectState()
+    record_storage(state, {}, estimate)
+    project = build_project(state)
+
     plan = TransferPlan(
         dataset_name="FASTQ",
         size_gb=Decimal(1024),
@@ -87,8 +98,9 @@ def test_with_transfer_attaches_config_and_result_without_touching_other_fields(
         transfer_method="Not yet selected",
     )
     result = build_transfer_plan_result(plan, pricing)
+    record_transfer(state, plan, {}, result)
 
-    updated = project.with_transfer(plan, result)
+    updated = build_project(state)
 
     assert updated.transfer_config is plan
     assert updated.transfer_result is result
