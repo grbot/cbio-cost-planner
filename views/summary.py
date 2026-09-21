@@ -76,20 +76,26 @@ def render() -> None:
             compute = project.compute_result
             st.markdown("**Compute**")
             st.markdown(
-                "Workflow: FASTQ -> BWA-MEM2 -> CRAM index -> DeepVariant -> gVCF -> GLnexus "
-                "(not yet quantified)"
+                "Workflow: BWA-MEM2 + CRAM index + DeepVariant  \n"
+                "GLnexus shown but excluded pending benchmark"
             )
             st.caption(
                 "Execution environment: Ilifu/HPC (reference — no monetary cost modelled) and "
                 "AWS (architecture defined, pricing pending)."
             )
-            ccol1, ccol2, ccol3 = st.columns(3)
-            ccol1.metric("Sequential-stage planning estimate", f"{compute.known_modelled_elapsed_hours:,.1f} h")
+            ccol1, ccol2, ccol3, ccol4 = st.columns(4)
+            ccol1.metric("Sequential-stage planning estimate", f"{compute.known_modelled_elapsed_hours:,.2f} h")
             ccol2.metric(
-                "Concurrency (align/DV)",
-                f"{compute.alignment.concurrency} / {compute.deepvariant.concurrency}",
+                "Alignment workers",
+                f"{compute.alignment.effective_concurrency} active of "
+                f"{compute.alignment.configured_concurrency} configured",
             )
             ccol3.metric(
+                "DeepVariant workers",
+                f"{compute.deepvariant.effective_concurrency} active of "
+                f"{compute.deepvariant.configured_concurrency} configured",
+            )
+            ccol4.metric(
                 "Peak working storage", f"{compute.working_storage.peak_simultaneous_gib:,.0f} GiB"
             )
             st.caption(
@@ -97,7 +103,10 @@ def render() -> None:
                 "(DeepVariant) + Planning assumptions (RAM, scratch) — GLnexus excluded, no "
                 "approved benchmark."
             )
-            theme.callout("Compute cost — not yet calculated", "AWS compute pricing is pending verified regional pricing (see Compute page).")
+            theme.callout(
+                "Compute cost — not yet calculated",
+                "AWS regional pricing status: pending verified regional pricing (see Compute page).",
+            )
         else:
             theme.callout(
                 "Compute",

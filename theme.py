@@ -391,8 +391,13 @@ tr.gro-row-emphasis td {{
     display: flex;
     align-items: center;
     gap: 0;
+    row-gap: 0.5rem;
     margin: 1rem 0 1.5rem 0;
     flex-wrap: wrap;
+}}
+.gro-diagram-step {{
+    display: flex;
+    align-items: center;
 }}
 .gro-diagram-box {{
     border: 1.5px solid {NAVY};
@@ -423,6 +428,17 @@ tr.gro-row-emphasis td {{
     font-size: 1.3rem;
     padding: 0 0.6rem;
     font-weight: 700;
+}}
+@media (max-width: 480px) {{
+    .gro-diagram-box {{
+        min-width: 7rem;
+        font-size: 0.78rem;
+        padding: 0.5rem 0.7rem;
+    }}
+    .gro-diagram-arrow {{
+        font-size: 1.1rem;
+        padding: 0 0.35rem;
+    }}
 }}
 
 /* ---- Form control contrast (requests/003-styling.md, requests/004-style.md) ---- */
@@ -615,16 +631,22 @@ def process_diagram(
     when given, is parallel to ``steps``: a small caption line rendered under
     a box's label wherever the corresponding entry is not ``None`` (spec 011a
     §14 — distinguishing modelled from not-yet-quantified workflow stages).
+
+    Each step's incoming arrow (if any) is wrapped together with its box in
+    one atomic ``.gro-diagram-step`` flex item, rather than the arrow and box
+    being separate flex children of ``.gro-diagram`` — flexbox never breaks
+    within a flex item, so wrapping at narrow widths can never separate an
+    arrow from the box it points to (spec 011b §6).
     """
     accent_indices = accent_indices or set()
     parts: list[str] = ['<div class="gro-diagram">']
     for i, step in enumerate(steps):
-        if i > 0:
-            parts.append('<span class="gro-diagram-arrow">&rarr;</span>')
         css_class = "gro-diagram-box gro-diagram-box--teal" if i in accent_indices else "gro-diagram-box"
         subtitle = subtitles[i] if subtitles is not None else None
         subtitle_html = f'<span class="gro-diagram-box-subtitle">{subtitle}</span>' if subtitle else ""
-        parts.append(f'<div class="{css_class}">{step}{subtitle_html}</div>')
+        box_html = f'<div class="{css_class}">{step}{subtitle_html}</div>'
+        arrow_html = '<span class="gro-diagram-arrow">&rarr;</span>' if i > 0 else ""
+        parts.append(f'<div class="gro-diagram-step">{arrow_html}{box_html}</div>')
     parts.append("</div>")
     st.markdown("".join(parts), unsafe_allow_html=True)
 

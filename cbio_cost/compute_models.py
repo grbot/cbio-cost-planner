@@ -37,11 +37,14 @@ class ComputeStage:
 @dataclass
 class ConcurrencyResult:
     """Idealised planning elapsed-time/worker-hours for one per-sample stage
-    (spec 011 §14)."""
+    (spec 011 §14). ``configured_concurrency`` is the user's raw setting;
+    ``effective_concurrency`` is capped at the sample count, since only one
+    per-sample task can actually be active per sample (spec 011b §2)."""
 
     stage_name: str
     samples: int
-    concurrency: int
+    configured_concurrency: int
+    effective_concurrency: int
     runtime_per_unit_hours: Decimal
     waves: int
     worker_hours: Decimal
@@ -53,11 +56,14 @@ class ConcurrencyResult:
 @dataclass
 class WorkingStorageResult:
     """Simultaneous working/scratch storage requirement (spec 011 §13; stage-
-    specific peak logic refined in spec 011a §12)."""
+    specific peak logic refined in spec 011a §12; peaks driven by effective,
+    not configured, concurrency since spec 011b §4)."""
 
     scratch_per_worker_gib: Decimal
-    alignment_concurrency: int
-    deepvariant_concurrency: int
+    alignment_configured_concurrency: int
+    alignment_effective_concurrency: int
+    deepvariant_configured_concurrency: int
+    deepvariant_effective_concurrency: int
     alignment_peak_gib: Decimal
     deepvariant_peak_gib: Decimal
     peak_simultaneous_gib: Decimal

@@ -113,39 +113,53 @@ def build_glnexus_stage() -> ComputeStage:
 
 
 # ---------------------------------------------------------------------------
-# Concurrency model (spec 011 §14)
+# Concurrency model (spec 011 §14; effective-vs-configured split, spec 011b §2-§4)
 # ---------------------------------------------------------------------------
+
+
+def _effective_concurrency(samples: int, configured_concurrency: int) -> int:
+    """Only one per-sample task can run at once per sample — capacity beyond
+    the sample count cannot actually be used (spec 011b §2). Configured
+    concurrency is never rewritten; this is used only as a calculation
+    input, distinct from the user's configured setting."""
+    return min(samples, configured_concurrency)
 
 
 def concurrency_result(
     stage_name: str,
     samples: int,
-    concurrency: int,
+    configured_concurrency: int,
     runtime_per_unit_hours: Decimal,
     runtime_evidence: Evidence,
     runtime_basis: str,
 ) -> ConcurrencyResult:
     """Idealised planning waves/elapsed-time for one per-sample stage.
 
-    ``waves = ceil(samples / concurrency)``; elapsed time is idealised and
-    excludes queue delay, instance startup, retries, staging, interruptions,
-    contention and workflow overhead (spec 011 §14).
+    ``waves = ceil(samples / effective_concurrency)``, where
+    ``effective_concurrency = min(samples, configured_concurrency)`` (spec
+    011b §2-§3) — configured capacity beyond the sample count cannot
+    actually be active. ``worker_hours`` stays independent of concurrency.
+    Elapsed time is idealised and excludes queue delay, instance startup,
+    retries, staging, interruptions, contention and workflow overhead
+    (spec 011 §14).
     """
     if samples <= 0:
         raise ValueError("samples must be positive")
-    if concurrency <= 0:
-        raise ValueError("concurrency must be positive")
+    if configured_concurrency <= 0:
+        raise ValueError("configured_concurrency must be positive")
     if runtime_per_unit_hours < 0:
         raise ValueError("runtime_per_unit_hours cannot be negative")
 
-    waves = math.ceil(Decimal(samples) / Decimal(concurrency))
+    effective_concurrency = _effective_concurrency(samples, configured_concurrency)
+    waves = math.ceil(Decimal(samples) / Decimal(effective_concurrency))
     worker_hours = Decimal(samples) * runtime_per_unit_hours
     idealised_elapsed_hours = Decimal(waves) * runtime_per_unit_hours
 
     return ConcurrencyResult(
         stage_name=stage_name,
         samples=samples,
-        concurrency=concurrency,
+        configured_concurrency=configured_concurrency,
+        effective_concurrency=effective_concurrency,
         runtime_per_unit_hours=runtime_per_unit_hours,
         waves=waves,
         worker_hours=worker_hours,
@@ -158,52 +172,63 @@ def concurrency_result(
 def _stage_concurrency(
     stage_name: str,
     samples: int,
-    concurrency: int,
+    configured_concurrency: int,
     benchmark_hours: Decimal,
     benchmark_evidence: Evidence,
     override_hours: Decimal | None,
 ) -> ConcurrencyResult:
     if override_hours is not None:
         return concurrency_result(
-            stage_name, samples, concurrency, override_hours, benchmark_evidence, "user_override"
+            stage_name, samples, configured_concurrency, override_hours, benchmark_evidence, "user_override"
         )
     return concurrency_result(
-        stage_name, samples, concurrency, benchmark_hours, benchmark_evidence, "benchmark"
+        stage_name, samples, configured_concurrency, benchmark_hours, benchmark_evidence, "benchmark"
     )
 
 
 # ---------------------------------------------------------------------------
-# Working storage (spec 011 §12-§13)
+# Working storage (spec 011 §12-§13; effective concurrency, spec 011b §4)
 # ---------------------------------------------------------------------------
 
 
 def working_storage_result(
     scratch_per_worker_gib: Decimal,
-    alignment_concurrency: int,
-    deepvariant_concurrency: int,
+    samples: int,
+    alignment_configured_concurrency: int,
+    deepvariant_configured_concurrency: int,
 ) -> WorkingStorageResult:
-    """Stage-specific working storage (spec 011a §12).
+    """Stage-specific working storage (spec 011a §12), driven by each
+    stage's *effective* concurrency (spec 011b §4) — configured capacity
+    beyond the sample count would otherwise overstate simultaneous scratch
+    for small projects.
 
     The same per-worker scratch assumption is used for both stages, but each
-    stage's peak scratch is driven by its own concurrency setting. Under the
-    sequential-stage execution model, peak workflow scratch is the max of
-    the two stage peaks, not their sum, unless the stages are explicitly
+    stage's peak scratch is driven by its own effective concurrency. Under
+    the sequential-stage execution model, peak workflow scratch is the max
+    of the two stage peaks, not their sum, unless the stages are explicitly
     modelled as running concurrently.
     """
     if scratch_per_worker_gib < 0:
         raise ValueError("scratch_per_worker_gib cannot be negative")
-    if alignment_concurrency <= 0:
-        raise ValueError("alignment_concurrency must be positive")
-    if deepvariant_concurrency <= 0:
-        raise ValueError("deepvariant_concurrency must be positive")
+    if samples <= 0:
+        raise ValueError("samples must be positive")
+    if alignment_configured_concurrency <= 0:
+        raise ValueError("alignment_configured_concurrency must be positive")
+    if deepvariant_configured_concurrency <= 0:
+        raise ValueError("deepvariant_configured_concurrency must be positive")
 
-    alignment_peak_gib = scratch_per_worker_gib * Decimal(alignment_concurrency)
-    deepvariant_peak_gib = scratch_per_worker_gib * Decimal(deepvariant_concurrency)
+    alignment_effective_concurrency = _effective_concurrency(samples, alignment_configured_concurrency)
+    deepvariant_effective_concurrency = _effective_concurrency(samples, deepvariant_configured_concurrency)
+
+    alignment_peak_gib = scratch_per_worker_gib * Decimal(alignment_effective_concurrency)
+    deepvariant_peak_gib = scratch_per_worker_gib * Decimal(deepvariant_effective_concurrency)
 
     return WorkingStorageResult(
         scratch_per_worker_gib=scratch_per_worker_gib,
-        alignment_concurrency=alignment_concurrency,
-        deepvariant_concurrency=deepvariant_concurrency,
+        alignment_configured_concurrency=alignment_configured_concurrency,
+        alignment_effective_concurrency=alignment_effective_concurrency,
+        deepvariant_configured_concurrency=deepvariant_configured_concurrency,
+        deepvariant_effective_concurrency=deepvariant_effective_concurrency,
         alignment_peak_gib=alignment_peak_gib,
         deepvariant_peak_gib=deepvariant_peak_gib,
         peak_simultaneous_gib=max(alignment_peak_gib, deepvariant_peak_gib),
@@ -339,6 +364,7 @@ def build_compute_result(num_samples: int, config: ComputeConfig, usd_zar: Decim
 
     working_storage = working_storage_result(
         config.scratch_gib_per_worker,
+        num_samples,
         config.alignment_concurrency,
         config.deepvariant_concurrency,
     )

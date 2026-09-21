@@ -224,7 +224,8 @@ def _stage_row(stage) -> dict[str, Any]:
 def _concurrency_row(result) -> dict[str, Any]:
     return {
         "samples": result.samples,
-        "concurrency": result.concurrency,
+        "configured_concurrency": result.configured_concurrency,
+        "effective_concurrency": result.effective_concurrency,
         "runtime_per_unit_hours": str(result.runtime_per_unit_hours),
         "runtime_basis": result.runtime_basis,
         "waves": result.waves,
@@ -253,6 +254,10 @@ def compute_to_json(project_name: str, num_samples: int, result: ComputeResult) 
         "alignment": _concurrency_row(result.alignment),
         "alignment_measured_peak_ram": alignment_stage.evidence["measured_peak_memory"].value,
         "alignment_planning_ram": f"{alignment_stage.memory_gib} GiB",
+        "configured_alignment_workers": result.alignment.configured_concurrency,
+        "effective_alignment_concurrency": result.alignment.effective_concurrency,
+        "configured_deepvariant_workers": result.deepvariant.configured_concurrency,
+        "effective_deepvariant_concurrency": result.deepvariant.effective_concurrency,
         "cram_index": _concurrency_row(result.cram_index),
         "cram_index_runtime": str(cram_index_stage.runtime_hours),
         "cram_index_evidence": cram_index_stage.evidence["runtime"].label,
@@ -270,8 +275,10 @@ def compute_to_json(project_name: str, num_samples: int, result: ComputeResult) 
         "unmodelled_overhead": result.unmodelled_overhead,
         "working_storage": {
             "scratch_per_worker_gib": str(result.working_storage.scratch_per_worker_gib),
-            "alignment_concurrency": result.working_storage.alignment_concurrency,
-            "deepvariant_concurrency": result.working_storage.deepvariant_concurrency,
+            "alignment_configured_concurrency": result.working_storage.alignment_configured_concurrency,
+            "alignment_effective_concurrency": result.working_storage.alignment_effective_concurrency,
+            "deepvariant_configured_concurrency": result.working_storage.deepvariant_configured_concurrency,
+            "deepvariant_effective_concurrency": result.working_storage.deepvariant_effective_concurrency,
             "alignment_peak_gib": str(result.working_storage.alignment_peak_gib),
             "deepvariant_peak_gib": str(result.working_storage.deepvariant_peak_gib),
             "peak_simultaneous_gib": str(result.working_storage.peak_simultaneous_gib),
@@ -339,11 +346,26 @@ def compute_to_csv(project_name: str, num_samples: int, result: ComputeResult) -
     writer.writerow([])
     writer.writerow(["Working storage: scratch/worker (GiB)", str(result.working_storage.scratch_per_worker_gib)])
     writer.writerow(["Working storage: scratch evidence", result.working_storage.evidence.label])
-    writer.writerow(["Working storage: alignment concurrency", str(result.working_storage.alignment_concurrency)])
+    writer.writerow(
+        ["Working storage: alignment configured concurrency", str(result.working_storage.alignment_configured_concurrency)]
+    )
+    writer.writerow(
+        ["Working storage: alignment effective concurrency", str(result.working_storage.alignment_effective_concurrency)]
+    )
     writer.writerow(["Working storage: alignment peak (GiB)", str(result.working_storage.alignment_peak_gib)])
-    writer.writerow(["Working storage: DeepVariant concurrency", str(result.working_storage.deepvariant_concurrency)])
+    writer.writerow(
+        ["Working storage: DeepVariant configured concurrency", str(result.working_storage.deepvariant_configured_concurrency)]
+    )
+    writer.writerow(
+        ["Working storage: DeepVariant effective concurrency", str(result.working_storage.deepvariant_effective_concurrency)]
+    )
     writer.writerow(["Working storage: DeepVariant peak (GiB)", str(result.working_storage.deepvariant_peak_gib)])
     writer.writerow(["Working storage: peak simultaneous (GiB)", str(result.working_storage.peak_simultaneous_gib)])
+    writer.writerow([])
+    writer.writerow(["configured_alignment_workers", result.alignment.configured_concurrency])
+    writer.writerow(["effective_alignment_concurrency", result.alignment.effective_concurrency])
+    writer.writerow(["configured_deepvariant_workers", result.deepvariant.configured_concurrency])
+    writer.writerow(["effective_deepvariant_concurrency", result.deepvariant.effective_concurrency])
     writer.writerow([])
     writer.writerow(["AWS region", f"{result.aws.region_name} ({result.aws.region_code})"])
     writer.writerow(["AWS compute price", result.aws.pricing_status])
@@ -392,9 +414,11 @@ def compute_to_markdown(project_name: str, num_samples: int, result: ComputeResu
             "",
             f"- Scratch/worker: {result.working_storage.scratch_per_worker_gib} GiB "
             f"({result.working_storage.evidence.label})",
-            f"- Alignment: {result.working_storage.alignment_concurrency} workers -> "
+            f"- Alignment: {result.working_storage.alignment_effective_concurrency} of "
+            f"{result.working_storage.alignment_configured_concurrency} configured workers active -> "
             f"{result.working_storage.alignment_peak_gib} GiB peak",
-            f"- DeepVariant: {result.working_storage.deepvariant_concurrency} workers -> "
+            f"- DeepVariant: {result.working_storage.deepvariant_effective_concurrency} of "
+            f"{result.working_storage.deepvariant_configured_concurrency} configured workers active -> "
             f"{result.working_storage.deepvariant_peak_gib} GiB peak",
             f"- Peak simultaneous scratch: {result.working_storage.peak_simultaneous_gib} GiB "
             "(max of the two stage peaks, not their sum)",

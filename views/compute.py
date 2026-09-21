@@ -1,5 +1,5 @@
 """Compute module — WGS 30x resource, runtime, working-storage and
-execution-environment planner (spec 011; refined in spec 011a).
+execution-environment planner (spec 011; refined in spec 011a and 011b).
 
 Only widget reading and rendering happens here; every calculation runs in
 ``cbio_cost.compute`` / ``cbio_cost.compute_benchmarks``. V1 supports the WGS
@@ -199,13 +199,17 @@ def render() -> None:
         theme.table(
             columns=["Component", "Status"],
             rows=[
-                ["Resource model", "Implemented"],
-                ["Runtime model", "Implemented"],
-                ["Working storage", "Implemented"],
-                ["AWS architecture", "Implemented"],
-                ["AWS price", aws_info.pricing_status],
+                ["Workflow resource requirements", "Implemented"],
+                ["Sequential runtime planning model", "Implemented"],
+                ["Working-storage planning model", "Implemented"],
+                ["AWS execution architecture", "Implemented"],
+                ["EC2 instance mapping", "Pending"],
+                ["AWS regional pricing", f"Pending verified <code>{aws_info.region_code}</code> pricing"],
             ],
             align=["left", "left"],
+        )
+        st.caption(
+            "Ilifu and GCP benchmark performance cannot be assumed to reproduce exactly on AWS."
         )
 
     # ---------------------------------------------------------------------
@@ -312,7 +316,10 @@ def render() -> None:
         acol1, acol2, acol3, acol4 = st.columns(4)
         acol1.metric("Runtime/sample", f"{result.alignment.runtime_per_unit_hours:.3f} h")
         acol2.metric("Worker-hours", f"{result.alignment.worker_hours:,.1f}")
-        acol3.metric("Concurrency", str(result.alignment.concurrency))
+        acol3.metric(
+            "Active workers",
+            f"{result.alignment.effective_concurrency} of {result.alignment.configured_concurrency} configured",
+        )
         acol4.metric("Idealised elapsed", f"{result.alignment.idealised_elapsed_hours:,.2f} h")
 
         st.markdown("**CRAM index**")
@@ -320,7 +327,10 @@ def render() -> None:
         icol1, icol2, icol3, icol4 = st.columns(4)
         icol1.metric("Runtime/sample", f"{result.cram_index.runtime_per_unit_hours:.3f} h")
         icol2.metric("Worker-hours", f"{result.cram_index.worker_hours:,.1f}")
-        icol3.metric("Concurrency", str(result.cram_index.concurrency))
+        icol3.metric(
+            "Active workers",
+            f"{result.cram_index.effective_concurrency} of {result.cram_index.configured_concurrency} configured",
+        )
         icol4.metric("Idealised elapsed", f"{result.cram_index.idealised_elapsed_hours:,.2f} h")
 
         st.markdown("**DeepVariant**")
@@ -328,7 +338,10 @@ def render() -> None:
         dcol1, dcol2, dcol3, dcol4 = st.columns(4)
         dcol1.metric("Runtime/sample", f"{result.deepvariant.runtime_per_unit_hours:.3f} h")
         dcol2.metric("Worker-hours", f"{result.deepvariant.worker_hours:,.1f}")
-        dcol3.metric("Concurrency", str(result.deepvariant.concurrency))
+        dcol3.metric(
+            "Active workers",
+            f"{result.deepvariant.effective_concurrency} of {result.deepvariant.configured_concurrency} configured",
+        )
         dcol4.metric("Idealised elapsed", f"{result.deepvariant.idealised_elapsed_hours:,.2f} h")
 
         st.markdown("**Cohort calling (GLnexus)**")
@@ -358,17 +371,34 @@ def render() -> None:
             "DeepVariant workers; each stage's peak scratch is driven by its own concurrency setting."
         )
         wcol1, wcol2, wcol3 = st.columns(3)
-        wcol1.metric("Scratch / worker", f"{result.working_storage.scratch_per_worker_gib:g} GiB")
-        wcol2.metric(
-            "Alignment peak",
-            f"{result.working_storage.alignment_peak_gib:,.0f} GiB",
-            help=f"{result.working_storage.scratch_per_worker_gib:g} GiB × {result.working_storage.alignment_concurrency} alignment workers",
-        )
-        wcol3.metric(
-            "DeepVariant peak",
-            f"{result.working_storage.deepvariant_peak_gib:,.0f} GiB",
-            help=f"{result.working_storage.scratch_per_worker_gib:g} GiB × {result.working_storage.deepvariant_concurrency} DeepVariant workers",
-        )
+        with wcol1:
+            st.metric("Scratch / worker", f"{result.working_storage.scratch_per_worker_gib:g} GiB")
+        with wcol2:
+            st.metric(
+                "Alignment peak",
+                f"{result.working_storage.alignment_peak_gib:,.0f} GiB",
+                help=(
+                    f"{result.working_storage.scratch_per_worker_gib:g} GiB × "
+                    f"{result.working_storage.alignment_effective_concurrency} active alignment workers"
+                ),
+            )
+            st.caption(
+                f"{result.working_storage.alignment_effective_concurrency} active worker(s) from "
+                f"{result.working_storage.alignment_configured_concurrency} configured"
+            )
+        with wcol3:
+            st.metric(
+                "DeepVariant peak",
+                f"{result.working_storage.deepvariant_peak_gib:,.0f} GiB",
+                help=(
+                    f"{result.working_storage.scratch_per_worker_gib:g} GiB × "
+                    f"{result.working_storage.deepvariant_effective_concurrency} active DeepVariant workers"
+                ),
+            )
+            st.caption(
+                f"{result.working_storage.deepvariant_effective_concurrency} active worker(s) from "
+                f"{result.working_storage.deepvariant_configured_concurrency} configured"
+            )
         theme.headline(
             "Peak simultaneous working storage",
             f"{result.working_storage.peak_simultaneous_gib:,.0f} GiB",
@@ -399,6 +429,7 @@ def render() -> None:
             "included in the current workflow's runtime or cost totals.",
         )
         st.caption(f"{result.sentieon.evidence.label}: {result.sentieon.evidence.source}")
+        st.caption("Converted using the project's current USD/ZAR planning rate.")
 
         st.markdown("**DRAGEN / Illumina ICA**")
         theme.callout(
@@ -421,7 +452,11 @@ def render() -> None:
         theme.table(
             columns=["Workflow", "Accuracy evidence category"],
             rows=[
-                ["BWA-MEM2 + DeepVariant", "Published GIAB / hap.py accuracy metrics (DeepVariant)"],
+                [
+                    "BWA-MEM2 + DeepVariant",
+                    f'<a href="{bm.DEEPVARIANT_SOURCE_URL}" target="_blank" rel="noopener noreferrer">'
+                    "Published GIAB / hap.py accuracy metrics (DeepVariant)</a>",
+                ],
                 ["BWA-MEM2 + GATK HaplotypeCaller", "GIAB / precisionFDA benchmark evidence"],
                 ["DRAGEN pipeline", "GIAB / precisionFDA benchmark evidence"],
                 ["Sentieon pipeline", "GIAB / precisionFDA benchmark evidence"],
