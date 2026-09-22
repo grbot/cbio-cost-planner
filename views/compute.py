@@ -115,6 +115,9 @@ def _runtime_override(config_key: str, benchmark_evidence: Evidence, label: str)
 
 def render() -> None:
     state = get_project_state()
+    # Shared "which page rendered last" marker (spec 014 §26-30) -- see
+    # views/transfer.py's own use of this for why it exists.
+    st.session_state["_last_active_page"] = "compute"
     with st.container(border=True, key="section_compute"):
         theme.section_header(1, "Compute Planning")
         st.caption(
@@ -122,6 +125,17 @@ def render() -> None:
             "project. Results combine measured benchmarks, published benchmarks and explicit "
             "planning assumptions."
         )
+
+        # Unconfigured gate (spec 014 §5-§8, §48): the minimum-valid
+        # bootstrap project always calculates successfully but is not
+        # something the user has actually configured -- never show its
+        # WGS-specific profile label as though it describes a real project.
+        if not state.project_configured:
+            theme.callout(
+                "Compute",
+                "Configure a project to calculate compute requirements.",
+            )
+            return
 
         project: Project | None = build_project(state)
         is_wgs = (

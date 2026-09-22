@@ -26,12 +26,26 @@ APP_PATH = Path(__file__).resolve().parent.parent / "app.py"
 
 
 def test_app_starts_and_renders_default_storage_page():
+    """spec 014 §5-§8, §76: a brand-new session is genuinely unconfigured --
+    Storage must show its "Configure a project..." guidance, not a full
+    calculator for a project nobody set up (the pre-014 defect). This still
+    exercises the real import/render chain (AppTest, not bare-mode), so it
+    keeps catching any import-order/circularity mistake per this module's
+    original purpose -- only the expected page content changed."""
     at = AppTest.from_file(str(APP_PATH), default_timeout=30)
     at.run()
     assert not at.exception
     # The branding header (spec 010a) is raw HTML via theme.header(), not a
     # real st.title element, so look for it in the rendered markdown instead.
     assert any("CBIO" in md.value for md in at.markdown)
-    # The "Continue to Compute →" page_link (spec 012c §21) renders without
-    # the deferred navigation.py import raising.
+    # Fresh/unconfigured: no calculator, no "Continue to Compute →" link --
+    # just the guidance callout.
+    assert any("Configure a project" in md.value for md in at.markdown)
+    assert len(at.get("page_link")) == 0
+
+    # Loading the demo profile (the shared Project setup area's "Load
+    # Example" button) must produce the real calculator, including the
+    # forward "Continue to Compute →" page_link (spec 012c §21).
+    at.button(key="load_demo_button").click().run()
+    assert not at.exception
     assert len(at.get("page_link")) == 1

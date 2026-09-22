@@ -121,12 +121,41 @@ def _evidence_block(label: str, evidence: Evidence | None) -> None:
 
 def render() -> None:
     state = get_project_state()
+
+    # Page-level "was Transfer rendered on the immediately preceding script
+    # run" tracking (spec 014 §26-30): every page's render() stamps this
+    # shared marker with its own name at its own top (see views/storage.py,
+    # views/compute.py, views/summary.py), so reading it here -- before
+    # overwriting it -- tells us whether the *page itself* was navigated
+    # away from, not just whether a mode/toggle changed within it. This
+    # matters because every one of Transfer's widgets, not only the
+    # conditionally-branched ones, goes undrawn (and gets silently reset by
+    # Streamlit to its widget default) on any run where a different page is
+    # active -- switching mode is only one of the ways a widget can go
+    # undrawn; navigating away to Storage/Compute/Project Summary and back
+    # is another, and is not detected by comparing canonical vs current
+    # mode/toggle alone, since those don't change while the user is simply
+    # elsewhere.
+    transfer_page_active_last_run = st.session_state.get("_last_active_page") == "transfer"
+    st.session_state["_last_active_page"] = "transfer"
+
     with st.container(border=True, key="section_transfer"):
         theme.section_header(1, "Transfer Planning")
         st.caption(
             "Estimate data-movement volume, throughput, duration and known transfer costs for "
             "one endpoint-to-endpoint leg of the current project."
         )
+
+        # Unconfigured gate (spec 014 §5-§8, §49): the minimum-valid
+        # bootstrap project always calculates successfully but is not
+        # something the user has actually configured -- never show its
+        # WGS-specific mode label as though it describes a real project.
+        if not state.project_configured:
+            theme.callout(
+                "Transfer",
+                "Configure a project to calculate transfer requirements.",
+            )
+            return
 
         project: Project | None = build_project(state)
         if project is None:
@@ -157,7 +186,8 @@ def render() -> None:
     # behind one "transfer_loaded" flag, so if that flag survived but one
     # individual key (e.g. "transfer_dataset_choice") did not, the next
     # bare st.session_state[...] read below raised a KeyError.
-    sync_widget_defaults(state.transfer_widgets or _default_state(default_choice))
+    canonical_transfer_widgets = state.transfer_widgets or _default_state(default_choice)
+    sync_widget_defaults(canonical_transfer_widgets)
     if st.session_state.get("transfer_dataset_choice") not in dataset_options:
         st.session_state["transfer_dataset_choice"] = default_choice
 
@@ -235,6 +265,50 @@ def render() -> None:
     # widget key's possible removal and its use here.
     sync_widget_defaults(state.transfer_widgets)
 
+    # Location reassert (spec 014 §26-30, §27): transfer_source_location and
+    # transfer_destination_location are always drawn whenever Transfer is
+    # the active page (unlike the mode-conditional fields below), but they
+    # still go undrawn -- and so still get silently reset to "" by real
+    # Streamlit, confirmed by live reproduction -- on any run where a
+    # different page is active, since none of Transfer's widgets execute
+    # then. Guarded the same way as every other reassert in this function:
+    # only overwrite when the live value already looks like the corrupted
+    # default (a genuinely blank location the user has never set also looks
+    # like "", so this is a safe no-op for that case too).
+    location_needs_reassert = bool(state.transfer_widgets) and not transfer_page_active_last_run
+    if location_needs_reassert:
+        for location_key in ("transfer_source_location", "transfer_destination_location"):
+            if st.session_state.get(location_key) == "":
+                st.session_state[location_key] = state.transfer_widgets.get(location_key, "")
+
+    # RTT reassert-on-activation (spec 014 §26-30) must happen here, before
+    # the plan below reads transfer_rtt_ms and before record_transfer()
+    # captures it into canonical state -- the RTT widget itself is drawn
+    # much later, in section 7, but transfer_rtt_enabled's *value* is
+    # already available in session_state by this point (Streamlit widgets
+    # read from session_state; they don't need to have been drawn yet this
+    # run to have a current value). Reasserting only in section 7, after
+    # record_transfer() has already run, would be too late: it would
+    # capture and permanently commit the corrupted value into canonical
+    # state before ever getting a chance to restore it. Same rationale as
+    # the throughput reassert below, which faces no such ordering problem
+    # since section 4 already runs before record_transfer(). Needed
+    # whenever the RTT field went undrawn for *any* reason -- either RTT was
+    # just enabled this run (canonical still shows it disabled), or Transfer
+    # itself was not the active page last run (a full page navigation away
+    # and back, confirmed by live reproduction to reset every one of
+    # Transfer's widgets to their declared defaults, not only the
+    # mode/toggle-conditional ones) -- guarded, like every check here, by
+    # also requiring the live value to already look like the corrupted
+    # default, so a genuine live edit mid-typing is never clobbered.
+    rtt_needs_reassert = bool(state.transfer_widgets) and (
+        not transfer_page_active_last_run
+        or not state.transfer_widgets.get("transfer_rtt_enabled", False)
+    )
+    if st.session_state.get("transfer_rtt_enabled") and rtt_needs_reassert:
+        if st.session_state.get("transfer_rtt_ms") == 0.0:
+            st.session_state["transfer_rtt_ms"] = state.transfer_widgets.get("transfer_rtt_ms", 0.0)
+
     try:
         source = _endpoint_from_state("source", state.transfer_widgets)
         destination = _endpoint_from_state("destination", state.transfer_widgets)
@@ -266,7 +340,45 @@ def render() -> None:
             key="transfer_throughput_mode",
         )
         mode = st.session_state["transfer_throughput_mode"]
+        # Real Streamlit silently resets a widget's session-state value to
+        # its own default the moment that widget is not instantiated on a
+        # run (the key stays present, so sync_widget_defaults()'s
+        # key-absence check never detects or repairs it) -- spec 014 §26-30,
+        # root cause confirmed by live reproduction against a real
+        # streamlit.testing.v1.AppTest run, not just this module's bare-mode
+        # tests. This happens not only when the mode radio switches away
+        # from a branch within this page, but on *any* run where Transfer's
+        # own render() does not execute at all -- e.g. the user navigates to
+        # Storage/Compute/Project Summary and back while mode stays
+        # "measured" the whole time; also confirmed live. Reassert the last
+        # canonical value here, but only when BOTH (a) the branch went
+        # undrawn on the immediately preceding run -- either because the
+        # mode changed within this page (compared against the mode
+        # canonical state recorded at the end of the *previous* run) or
+        # because Transfer was not the active page at all last run -- AND
+        # (b) the live value already looks like the corrupted default. (a)
+        # alone would also fire the moment a field is genuinely configured
+        # for the very first time (e.g. switching straight to "measured" and
+        # typing a throughput in one step), which must never be overwritten;
+        # (b) alone would also fire on an ordinary rerun while the field
+        # legitimately holds its default value, or in a test that sets a
+        # session-state value directly and calls render() without going
+        # through a real widget lifecycle. Only the conjunction uniquely
+        # identifies "Streamlit reset this because the widget went undrawn".
+        mode_needs_reassert = bool(state.transfer_widgets) and (
+            not transfer_page_active_last_run
+            or state.transfer_widgets.get("transfer_throughput_mode") != mode
+        )
         if mode == "measured":
+            if mode_needs_reassert:
+                if st.session_state.get("transfer_measured_mbps") == 0.0:
+                    st.session_state["transfer_measured_mbps"] = state.transfer_widgets.get(
+                        "transfer_measured_mbps", 0.0
+                    )
+                if st.session_state.get("transfer_measured_note") == "":
+                    st.session_state["transfer_measured_note"] = state.transfer_widgets.get(
+                        "transfer_measured_note", ""
+                    )
             mcol1, mcol2 = st.columns(2)
             with mcol1:
                 st.number_input("Measured throughput (Mbps)", min_value=0.0, step=10.0, key="transfer_measured_mbps")
@@ -274,6 +386,15 @@ def render() -> None:
                 st.text_input("Note (optional)", key="transfer_measured_note", placeholder="e.g. Globus transfer UCT → Ilifu")
             st.caption("Do not treat a speed-test result as equivalent to sustained bulk-transfer throughput.")
         elif mode == "known_capacity":
+            if mode_needs_reassert:
+                if st.session_state.get("transfer_link_capacity_mbps") == 0.0:
+                    st.session_state["transfer_link_capacity_mbps"] = state.transfer_widgets.get(
+                        "transfer_link_capacity_mbps", 1000.0
+                    )
+                if st.session_state.get("transfer_efficiency_percent") == 0.0:
+                    st.session_state["transfer_efficiency_percent"] = state.transfer_widgets.get(
+                        "transfer_efficiency_percent", float(DEFAULT_EFFICIENCY_PERCENT)
+                    )
             lcol1, lcol2 = st.columns(2)
             with lcol1:
                 st.number_input("Link capacity (Mbps)", min_value=0.0, step=100.0, key="transfer_link_capacity_mbps")
@@ -398,6 +519,10 @@ def render() -> None:
             with pcol2:
                 st.text_input("Destination location", key="transfer_destination_location", placeholder="e.g. Frankfurt")
             st.caption("Descriptive only — bandwidth is never inferred from geography.")
+            # transfer_rtt_ms's reassert-on-activation already happened
+            # earlier in this run, before the plan below read it and before
+            # record_transfer() captured it (see that comment for why it
+            # cannot happen here, at the widget itself).
             st.checkbox("Provide round-trip time (RTT)", key="transfer_rtt_enabled")
             if st.session_state["transfer_rtt_enabled"]:
                 st.number_input("Round-trip time (ms)", min_value=0.0, step=10.0, key="transfer_rtt_ms")

@@ -69,6 +69,22 @@ def render() -> None:
         theme.section_header(1, "Project Summary")
 
         state = get_project_state()
+        # Shared "which page rendered last" marker (spec 014 §26-30) -- see
+        # views/transfer.py's own use of this for why it exists.
+        st.session_state["_last_active_page"] = "summary"
+
+        # Unconfigured gate (spec 014 §5-§8, §50): the minimum-valid
+        # bootstrap project always calculates successfully but is not
+        # something the user has actually configured -- Summary must not
+        # fabricate a one-sample project or show its status badges as
+        # though a real project exists yet.
+        if not state.project_configured:
+            theme.callout(
+                "Project not yet configured.",
+                "Configure a project to generate an infrastructure summary.",
+            )
+            return
+
         project = build_project(state)
         s_status = storage_status(state)
         c_status = compute_status(state)
@@ -83,24 +99,6 @@ def render() -> None:
                 "information that has actually been calculated — nothing is invented here.",
             )
             return
-
-        # Direct-entry wording (spec 012a §21; fixed in spec 012c §14-17): a
-        # fresh session already has a minimum-valid project (app.py's
-        # bootstrap) — say so explicitly rather than implying it reflects
-        # the user's actual project. Uses the explicit ``project_configured``
-        # flag, not a revision counter — storage_config_revision only tracks
-        # Storage-only settings (headroom/archive/engineering), so a fully
-        # configured 500-sample project that never touched those specific
-        # fields would incorrectly stay at revision 0 forever and be
-        # permanently misreported as unconfigured (the exact bug reproduced
-        # in spec 012c §14).
-        if not state.project_configured:
-            theme.callout(
-                "Showing the minimum default project",
-                "This project has not been configured yet — figures below reflect the "
-                "application's 1-sample minimum-valid default, not a real project. "
-                "Configure Storage to plan your actual project.",
-            )
 
         estimate = project.storage_estimate
         meta = project.metadata

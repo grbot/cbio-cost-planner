@@ -15,7 +15,7 @@ navigation) lives in ``app.py``, which calls :func:`render` for this page.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -30,6 +30,7 @@ from cbio_cost.calculator import build_estimate, build_scenarios, explain_result
 from cbio_cost.export import STORAGE_CLASS_LABELS
 from cbio_cost.models import (
     WGS_FILE_TYPES,
+    CostEstimate,
     CurrencyAssumptions,
     Dataset,
     EngineeringAssumptions,
@@ -41,6 +42,7 @@ from cbio_cost.models import (
 from cbio_cost.project import PROJECT_SESSION_KEY, Project, build_project
 from cbio_cost.project_state import (
     STATUS_LABELS,
+    ProjectState,
     compute_status,
     get_project_state,
     record_storage,
@@ -304,6 +306,137 @@ def _build_project_from_session_state() -> Project:
     return build_project(state)
 
 
+@dataclass
+class _StorageComputation:
+    """Everything derived from one Storage-estimate recompute (spec 014
+    §12-§14, §22) that a caller might need afterwards -- returned rather
+    than left as ``render()``-local variables so the same computation can be
+    triggered from outside Storage's own page (``refresh_current_estimate``,
+    called from ``app.py`` on every run) as well as from ``render()`` itself
+    (which additionally needs these values to build sensitivity scenarios)."""
+
+    estimate: CostEstimate
+    datasets: list[Dataset]
+    engineering: EngineeringAssumptions
+    currency: CurrencyAssumptions
+    transfer_contingency: Decimal
+    num_samples: int | None
+    volumes: dict[str, FileTypeVolumeAssumption] | None
+    wgs_movement: WgsMovementAssumptions | None
+    active_months: Decimal | None
+
+
+def _recompute_estimate(state: ProjectState) -> _StorageComputation:
+    """Build this run's Storage estimate from current ``st.session_state``
+    values and record it into canonical ``ProjectState`` (spec 014 §12-§14,
+    §22, §25) -- the one place Storage's cost estimate is actually computed,
+    shared by Storage's own ``render()`` and ``refresh_current_estimate()``
+    below. Safe to call before any Storage widget has been drawn this run:
+    session state already holds each widget's current value by the time any
+    script executes (Streamlit's own rerun mechanism, plus
+    ``sync_widget_defaults`` healing), so this does not depend on Storage's
+    own widgets having rendered first. Raises ``ValueError`` on invalid
+    input -- callers decide how to surface that."""
+    pricing = _load_pricing()
+    is_wgs_mode = st.session_state["project_mode"] == WGS_MODE
+
+    if is_wgs_mode:
+        project_type = "WGS 30x"
+        num_samples, volumes, wgs_movement, active_months, datasets, headroom_fraction = (
+            _wgs_datasets_from_session_state()
+        )
+    else:
+        project_type = "Custom Project"
+        num_samples = None
+        volumes = None
+        wgs_movement = None
+        active_months = None
+        headroom_fraction = Decimal(0)
+        datasets = []
+        for dataset_id in st.session_state["custom_dataset_ids"]:
+            unit = st.session_state[f"custom_unit_{dataset_id}"]
+            size = _dec(st.session_state[f"custom_size_{dataset_id}"])
+            size_gb = size * GB_PER_TB if unit == "TB" else size
+            datasets.append(
+                Dataset(
+                    name=st.session_state[f"custom_name_{dataset_id}"],
+                    size_gb=size_gb,
+                    retrieval_fraction=_dec(st.session_state[f"custom_retrieval_{dataset_id}"]) / Decimal(100),
+                    read_passes=_dec(st.session_state[f"custom_passes_{dataset_id}"]),
+                    active_months=_dec(st.session_state[f"custom_active_months_{dataset_id}"]),
+                    archive_class=st.session_state[f"custom_archive_{dataset_id}"],
+                )
+            )
+
+    transfer_contingency = _dec(st.session_state["transfer_contingency_percent"]) / Decimal(100)
+    inputs = ProjectInputs(
+        project_name=st.session_state["project_name"] or "Untitled project",
+        project_type=project_type,
+        retention_years=_dec(st.session_state["retention_years"]),
+        transfer_contingency=transfer_contingency,
+        headroom_fraction=headroom_fraction,
+        num_samples=num_samples,
+    )
+    engineering = EngineeringAssumptions(
+        onboarding_hours=_dec(st.session_state["onboarding_hours"]),
+        operations_hours_per_year=_dec(st.session_state["operations_hours_per_year"]),
+        closeout_hours=_dec(st.session_state["closeout_hours"]),
+        hourly_rate_zar=_dec(st.session_state["hourly_rate_zar"]),
+    )
+    currency = CurrencyAssumptions(
+        usd_zar=_dec(st.session_state["usd_zar"]),
+        vat_fraction=_dec(st.session_state["vat_percent"]) / Decimal(100),
+    )
+
+    estimate = build_estimate(inputs, datasets, engineering, pricing, currency)
+    estimate.explanation = explain_result(estimate)
+
+    # Canonical project state (spec 012a §6): record this result against
+    # the current widget configuration, bumping revisions only where an
+    # actual value changed, so Project Summary can later tell whether
+    # this (or any other module's) result is still current.
+    record_storage(state, _current_storage_widgets(datasets), estimate)
+
+    # Shared project model (spec 010 §4, spec 013 §2/§8/§40-41): a pure
+    # projection of ProjectState, built fresh here (never mutated
+    # incrementally) so Compute/Transfer attachments already recorded in
+    # ProjectState survive a Storage re-render regardless of navigation
+    # order.
+    st.session_state[PROJECT_SESSION_KEY] = build_project(state)
+
+    return _StorageComputation(
+        estimate=estimate,
+        datasets=datasets,
+        engineering=engineering,
+        currency=currency,
+        transfer_contingency=transfer_contingency,
+        num_samples=num_samples,
+        volumes=volumes,
+        wgs_movement=wgs_movement,
+        active_months=active_months,
+    )
+
+
+def refresh_current_estimate(state: ProjectState) -> None:
+    """Unconditional per-run recompute (spec 014 §12-§14, §22, §25), called
+    from ``app.py`` before ``st.navigation`` dispatches to whichever page is
+    active -- keeps ``storage_result``/``storage_widgets``/``project_revision``
+    live-current for Compute/Transfer/Summary even when Storage's own page
+    is never visited this session (previously they only refreshed when
+    Storage's own ``render()`` executed, so a project-header edit made while
+    on another page was invisible to Summary/status until Storage was next
+    opened). Swallows invalid input rather than crashing the whole app:
+    canonical state simply keeps its last-good value, and Storage's own
+    page still surfaces the real error to the user when they visit it."""
+    sync_widget_defaults(state.storage_widgets or _minimum_valid_state())
+    _init_custom_datasets()
+    _heal_custom_dataset_widgets(state.storage_widgets.get("custom_datasets"))
+    try:
+        _recompute_estimate(state)
+    except ValueError:
+        pass
+
+
 def ensure_project_state() -> None:
     """Guarantee a shared Project exists in session state before any page
     renders, regardless of which page the user opens first (spec 011a §3).
@@ -322,6 +455,30 @@ def ensure_project_state() -> None:
 
 def render() -> None:
     state = get_project_state()
+    # Shared "which page rendered last" marker (spec 014 §26-30) -- see
+    # views/transfer.py's own use of this for why it exists: Transfer needs
+    # to know whether it was the page active on the immediately preceding
+    # script run, since any of its widgets not drawn that run get silently
+    # reset by Streamlit to their declared defaults. Every page stamps its
+    # own name here unconditionally, even when about to show its own
+    # unconfigured guidance and return, so the marker always reflects the
+    # truth by the time any other page's render() reads it.
+    st.session_state["_last_active_page"] = "storage"
+
+    # Unconfigured gate (spec 014 §5-§8, §47): the minimum-valid bootstrap
+    # project (1 sample, blank name) always calculates successfully, but it
+    # is not something the user has actually configured -- never present its
+    # WGS-specific labels/figures as though it describes a real project.
+    if not state.project_configured:
+        with st.container(border=True, key="section_storage_unconfigured"):
+            theme.section_header(1, "Storage")
+            theme.callout(
+                "Storage",
+                'Configure a project to calculate storage requirements. Use "Edit project" '
+                'or "Load Example" above to get started.',
+            )
+        return
+
     # Per-key healing every render (spec 012a §8), not a single one-time
     # flag: seeds minimum-valid defaults only for a genuinely new project
     # (state.storage_widgets empty), otherwise heals any individually-
@@ -616,90 +773,38 @@ def render() -> None:
     # ---------------------------------------------------------------------------
 
     try:
-        if is_wgs_mode:
-            project_type = "WGS 30x"
-            num_samples, volumes, wgs_movement, active_months, datasets, headroom_fraction = (
-                _wgs_datasets_from_session_state()
-            )
-        else:
-            project_type = "Custom Project"
-            num_samples = None
-            headroom_fraction = Decimal(0)
-            datasets = []
-            for dataset_id in st.session_state["custom_dataset_ids"]:
-                unit = st.session_state[f"custom_unit_{dataset_id}"]
-                size = _dec(st.session_state[f"custom_size_{dataset_id}"])
-                size_gb = size * GB_PER_TB if unit == "TB" else size
-                datasets.append(
-                    Dataset(
-                        name=st.session_state[f"custom_name_{dataset_id}"],
-                        size_gb=size_gb,
-                        retrieval_fraction=_dec(st.session_state[f"custom_retrieval_{dataset_id}"]) / Decimal(100),
-                        read_passes=_dec(st.session_state[f"custom_passes_{dataset_id}"]),
-                        active_months=_dec(st.session_state[f"custom_active_months_{dataset_id}"]),
-                        archive_class=st.session_state[f"custom_archive_{dataset_id}"],
-                    )
-                )
-
-        transfer_contingency = _dec(st.session_state["transfer_contingency_percent"]) / Decimal(100)
-        inputs = ProjectInputs(
-            project_name=st.session_state["project_name"] or "Untitled project",
-            project_type=project_type,
-            retention_years=_dec(st.session_state["retention_years"]),
-            transfer_contingency=transfer_contingency,
-            headroom_fraction=headroom_fraction,
-            num_samples=num_samples,
-        )
-        engineering = EngineeringAssumptions(
-            onboarding_hours=_dec(st.session_state["onboarding_hours"]),
-            operations_hours_per_year=_dec(st.session_state["operations_hours_per_year"]),
-            closeout_hours=_dec(st.session_state["closeout_hours"]),
-            hourly_rate_zar=_dec(st.session_state["hourly_rate_zar"]),
-        )
-        currency = CurrencyAssumptions(
-            usd_zar=_dec(st.session_state["usd_zar"]),
-            vat_fraction=_dec(st.session_state["vat_percent"]) / Decimal(100),
-        )
-
-        estimate = build_estimate(inputs, datasets, engineering, pricing, currency)
-        estimate.explanation = explain_result(estimate)
-
-        # Canonical project state (spec 012a §6): record this result against
-        # the current widget configuration, bumping revisions only where an
-        # actual value changed, so Project Summary can later tell whether
-        # this (or any other module's) result is still current.
-        record_storage(state, _current_storage_widgets(datasets), estimate)
-
-        # Shared project model (spec 010 §4, spec 013 §2/§8/§40-41): a pure
-        # projection of ProjectState, built fresh here (never mutated
-        # incrementally) so Compute/Transfer attachments already recorded in
-        # ProjectState survive a Storage re-render regardless of navigation
-        # order.
-        st.session_state[PROJECT_SESSION_KEY] = build_project(state)
-
-        # Sensitivity scenarios (spec 006 §19): built from the *current* (possibly
-        # edited) datasets, varying only movement behaviour and contingency.
-        if is_wgs_mode:
-            scenarios = {
-                name: ScenarioAssumptions(
-                    datasets=cost_config.build_wgs_datasets(num_samples, volumes, movement, active_months),
-                    transfer_contingency=contingency,
-                )
-                for name, (movement, contingency) in wgs_scenario_overlays.items()
-            }
-        else:
-            scenario_multipliers = {"Low movement": Decimal("0.5"), "Expected": Decimal("1"), "High movement": Decimal("2")}
-            scenarios = {
-                name: ScenarioAssumptions(
-                    datasets=[replace(d, read_passes=d.read_passes * multiplier) for d in datasets],
-                    transfer_contingency=transfer_contingency * multiplier,
-                )
-                for name, multiplier in scenario_multipliers.items()
-            }
-        scenario_estimates = build_scenarios(inputs, engineering, pricing, currency, scenarios)
+        computation = _recompute_estimate(state)
     except ValueError as exc:
         st.error(f"Invalid input: {exc}")
         st.stop()
+
+    estimate = computation.estimate
+    datasets = computation.datasets
+
+    # Sensitivity scenarios (spec 006 §19): built from the *current* (possibly
+    # edited) datasets, varying only movement behaviour and contingency.
+    if is_wgs_mode:
+        scenarios = {
+            name: ScenarioAssumptions(
+                datasets=cost_config.build_wgs_datasets(
+                    computation.num_samples, computation.volumes, movement, computation.active_months
+                ),
+                transfer_contingency=contingency,
+            )
+            for name, (movement, contingency) in wgs_scenario_overlays.items()
+        }
+    else:
+        scenario_multipliers = {"Low movement": Decimal("0.5"), "Expected": Decimal("1"), "High movement": Decimal("2")}
+        scenarios = {
+            name: ScenarioAssumptions(
+                datasets=[replace(d, read_passes=d.read_passes * multiplier) for d in datasets],
+                transfer_contingency=computation.transfer_contingency * multiplier,
+            )
+            for name, multiplier in scenario_multipliers.items()
+        }
+    scenario_estimates = build_scenarios(
+        estimate.inputs, computation.engineering, pricing, computation.currency, scenarios
+    )
 
     # ---------------------------------------------------------------------------
     # 7. Cost output
@@ -906,21 +1011,21 @@ def render() -> None:
             st.download_button(
                 "Download CSV",
                 data=cost_export.to_csv(estimate, pricing),
-                file_name=f"{inputs.project_name.replace(' ', '_')}_cost_estimate.csv",
+                file_name=f"{estimate.inputs.project_name.replace(' ', '_')}_cost_estimate.csv",
                 mime="text/csv",
             )
         with excol2:
             st.download_button(
                 "Download JSON",
                 data=cost_export.to_json(estimate, pricing),
-                file_name=f"{inputs.project_name.replace(' ', '_')}_cost_estimate.json",
+                file_name=f"{estimate.inputs.project_name.replace(' ', '_')}_cost_estimate.json",
                 mime="application/json",
             )
         with excol3:
             st.download_button(
                 "Download Markdown summary",
                 data=cost_export.to_markdown(estimate, pricing),
-                file_name=f"{inputs.project_name.replace(' ', '_')}_cost_estimate.md",
+                file_name=f"{estimate.inputs.project_name.replace(' ', '_')}_cost_estimate.md",
                 mime="text/markdown",
             )
 

@@ -438,6 +438,84 @@ name, unrelated to the URL. No routing change was needed; this is
 documented here only because an earlier spec's own illustrative text used
 `/summary`.
 
+### V1 release hardening (spec 014)
+
+Four release-blocking defects survived the canonical-state architecture
+(specs 012a/013/013a) and were fixed for the `1.0.0` release, without
+redesigning that architecture.
+
+**Unconfigured pages no longer show fake WGS content.** Before 014,
+`ensure_project_state()`'s minimum-valid bootstrap (1 sample, blank name)
+let Storage, Compute, Transfer and Project Summary all compute and display
+a genuine-looking WGS 30x result on a session nobody had configured yet —
+the exact `project_configured` flag (spec 012c §14-17) already existed to
+distinguish this, but only the shared Project header and Summary's old
+"minimum default" callout read it; the four pages' own content did not.
+Each page's `render()` now checks `state.project_configured` first and, if
+`False`, shows only a one-line "Configure a project to calculate ___
+requirements" callout (Summary: "Project not yet configured. Configure a
+project to generate an infrastructure summary.") and returns — no
+WGS-specific header, label or figure is ever shown before the user has
+intentionally configured something (via the shared header's "Edit
+project" or "Load Example"). `storage_status`/`compute_status`/
+`transfer_status` are deliberately **not** changed to also depend on
+`project_configured` — that would contradict the already-settled 013a
+distinction quoted above (a project's minimum-valid Storage calculation
+staying genuinely `Complete` after `New project`), and every acceptance
+criterion this fixes is about page *content*, not the guided-flow-line
+status *label*; a page that returns early never reaches its own
+`guided_flow_line()` call either, so there is no visible contradiction.
+
+**Project Summary (and downstream status) now follows the current sample
+count immediately, without visiting Storage.** `build_project(state)` —
+the one source Summary/Compute/Transfer read for current project identity
+— derives `name`/`project_type`/`num_samples`/`retention_years` from
+`state.storage_result.inputs`, a snapshot only refreshed when Storage's
+own `render()` executes. Editing `num_samples` in the shared Project
+header updated raw `st.session_state` immediately, but `storage_result`
+(and therefore `project_revision`, `storage_status`, and every downstream
+staleness check) did not, until Storage was next opened. Fix: Storage's
+estimate-building logic (`views/storage.py`) was extracted into a shared
+`_recompute_estimate()`/public `refresh_current_estimate()`, and `app.py`
+now calls `storage.refresh_current_estimate(get_project_state())`
+unconditionally on every run, after the shared Project header renders and
+before `st.navigation(...).run()` dispatches to whichever page is active.
+This makes `storage_result`/`storage_widgets`/`project_revision` — and
+therefore Summary's identity and `compute_status`/`transfer_status`'s
+staleness detection — live-current regardless of which page the user is
+on, closing the gap without changing any calculation arithmetic. Storage's
+own `render()` still performs the same computation again after its
+page-specific widgets (headroom, engineering, per-dataset fields) draw, so
+in-page edits remain correctly reflected; the two calls are idempotent
+when nothing has changed.
+
+**Transfer's conditionally-drawn fields no longer silently reset.**
+Confirmed by live reproduction against a real `streamlit.testing.v1.AppTest`
+run (this module's own bare-mode tests could not detect it, since bare
+`st.session_state` has no widget lifecycle to reproduce the bug): real
+Streamlit resets a widget's session-state value to its own declared
+default the moment that widget is not instantiated on a script run — the
+key stays *present*, so `sync_widget_defaults()`'s key-absence check never
+detects or repairs it. This affects every one of Transfer's fields that
+is not drawn on some run, which includes not only the throughput-mode/RTT
+conditional fields but *any* Transfer field on a run where a **different
+page** is active, since none of Transfer's widgets execute then — a
+narrower fix limited to comparing canonical vs. current mode/RTT-enabled
+state (the first fix attempted) left exactly this broader case unfixed,
+since the mode never changes while the user is simply on another page.
+The fix has two parts: (1) `views/transfer.py` reassert the last canonical
+value for measured throughput, its note, known-capacity fields, RTT and
+both location fields immediately before they are next needed, but **only**
+when the live value already looks like the widget's own corrupted default
+— never unconditionally, so a genuine live edit (including a bare-mode
+test that sets a session-state value directly and calls `render()`) is
+never clobbered; (2) every page (`views/storage.py`, `views/compute.py`,
+`views/summary.py`, `views/transfer.py`) now stamps a shared
+`st.session_state["_last_active_page"]` marker with its own name at the
+top of its own `render()`, so Transfer can tell whether it was the page
+active on the immediately preceding run, not only whether its mode/RTT
+toggle changed within the same page visit.
+
 ### WGS 30x template
 
 A predefined planning profile for approximately 30x whole-genome
@@ -1378,6 +1456,12 @@ until they have been evaluated.
 - Transfer (§11) provider cost is calculated only for AWS S3 ↔ non-AWS
   endpoint pairs; every other pair shows "Not currently calculated," and
   transfer-method selection does not change the calculated throughput.
+- Transfer is planning only — it estimates volume, throughput and
+  duration for a proposed movement; it does not execute, schedule or
+  monitor an actual data transfer.
+- AWS EC2 instance-type/sizing recommendations are not yet implemented;
+  Compute reports worker-hours and working-storage peaks, not a concrete
+  instance shape.
 - The BWA-MEM2 benchmark behind Compute's alignment stage is one measured
   NA12878 execution on Ilifu hardware — not universal BWA-MEM2 performance,
   and AWS performance cannot be inferred exactly from Ilifu core counts.

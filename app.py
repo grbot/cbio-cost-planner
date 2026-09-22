@@ -15,6 +15,7 @@ import streamlit as st
 
 import project_setup
 import theme
+from cbio_cost.project_state import get_project_state
 from navigation import PAGES
 from views import storage
 
@@ -32,5 +33,13 @@ storage.ensure_project_state()
 # Load Example and New project — rendered once here so it appears
 # identically on every page, never duplicated per view.
 project_setup.render_project_area()
+
+# Unconditional per-run Storage recompute (spec 014 §12-§14, §22, §25) —
+# keeps storage_result/storage_widgets/project_revision live-current for
+# Compute/Transfer/Project Summary even when Storage's own page is never
+# visited this session, so a project-header edit (e.g. sample count) made
+# while on another page is reflected immediately rather than only after the
+# user next opens Storage.
+storage.refresh_current_estimate(get_project_state())
 
 st.navigation(PAGES, position="top").run()

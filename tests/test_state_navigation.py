@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 
+import pytest
 import streamlit as st
 
 from cbio_cost import export as cost_export
@@ -133,11 +134,18 @@ def test_direct_compute_entry_does_not_crash_or_show_contradictory_identity():
 
 
 def test_direct_transfer_entry_does_not_crash():
+    """spec 014 §5-§8: an unconfigured direct Transfer entry must not crash
+    -- and, since the minimum-valid bootstrap project is not something the
+    user has actually configured, Transfer must show its "Configure a
+    project..." guidance rather than compute a result for it (the pre-014
+    defect: a fake WGS transfer estimate for a project nobody set up)."""
     st.session_state.clear()
     storage.ensure_project_state()
-    transfer.render()
+    transfer.render()  # no exception is the primary assertion here
 
-    assert st.session_state["project"].transfer_result is not None
+    state = get_project_state()
+    assert state.transfer_result is None
+    assert transfer_status(state) == NOT_CONFIGURED
 
 
 def test_direct_summary_entry_does_not_present_default_as_authoritative():
@@ -239,6 +247,37 @@ def test_revisiting_stale_module_after_upstream_change_clears_needs_review():
     assert compute_status(state) == COMPLETE
 
 
+def test_summary_identity_and_status_sync_without_any_module_render():
+    """spec 014 §12-§14, §25, §66-§68: a shared Project-header edit (e.g.
+    ``num_samples``) must be reflected in ``build_project()``'s identity and
+    in every module's status *immediately* -- before Storage, Compute,
+    Transfer or Summary's own ``render()`` has run again. Simulates the
+    header edit directly on ``st.session_state`` (exactly what
+    ``project_setup.render_project_area()``'s widgets do) and calls only
+    ``storage.refresh_current_estimate()`` (what ``app.py`` now calls on
+    every run before ``st.navigation`` dispatches), never
+    ``storage.render()``/``compute.render()``/``transfer.render()``."""
+    st.session_state.clear()
+    _configure_reviewed_scenario()  # 500 samples, Compute/Transfer both Complete
+    state = get_project_state()
+    assert storage_status(state) == COMPLETE
+    assert compute_status(state) == COMPLETE
+    assert transfer_status(state) == COMPLETE
+
+    st.session_state["num_samples"] = 1000
+    storage.refresh_current_estimate(state)
+
+    assert build_project(state).metadata.num_samples == 1000
+    assert storage_status(state) == COMPLETE
+    assert compute_status(state) == NEEDS_REVIEW
+    assert transfer_status(state) == NEEDS_REVIEW
+
+    summary.render()
+    assert build_project(state).metadata.num_samples == 1000
+    assert compute_status(state) == NEEDS_REVIEW
+    assert transfer_status(state) == NEEDS_REVIEW
+
+
 # 5. Individual widget-key healing (spec 012a §7-§8, §29) --------------------
 #
 # The healing source dict must include every raw widget key, not just the
@@ -252,6 +291,8 @@ def test_revisiting_stale_module_after_upstream_change_clears_needs_review():
 def test_storage_heals_individually_missing_wgs_volume_and_archive_keys():
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
 
     del st.session_state["vol_FASTQ"]
@@ -268,6 +309,7 @@ def test_storage_heals_missing_custom_project_dataset_widgets():
     st.session_state.clear()
     storage.ensure_project_state()
     st.session_state["project_mode"] = "Custom Project"
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
 
     del st.session_state["custom_name_1"]
@@ -308,6 +350,8 @@ def test_transfer_known_capacity_mode_survives_round_trip():
     """spec 012c §9: distinctive known-capacity values (not just measured)."""
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     st.session_state.update(
         {
@@ -335,6 +379,8 @@ def test_transfer_unknown_mode_survives_round_trip():
     is NOT_CONFIGURED, not COMPLETE, however many pages are visited."""
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     st.session_state["transfer_throughput_mode"] = "unknown"
     transfer.render()
@@ -352,6 +398,8 @@ def test_transfer_distinctive_optional_fields_survive_round_trip():
     distinctive values, round-tripped through every page."""
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     st.session_state.update(
         {
@@ -497,6 +545,8 @@ def _configure_full_distinctive_transfer_scenario() -> None:
     """spec 012d §30: every editable Transfer field set to a distinctive,
     non-default value."""
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     st.session_state.update(
         {
@@ -542,6 +592,8 @@ def test_transfer_rtt_survives_widget_key_deletion():
     """Test B (spec §46): RTT enabled + 137 ms survive widget-key removal."""
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     st.session_state.update(
         {
@@ -575,6 +627,8 @@ def test_transfer_locations_survive_widget_key_deletion():
     fall back to canonical state, not a hardcoded blank."""
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     st.session_state.update(
         {
@@ -603,6 +657,8 @@ def test_transfer_note_survives_widget_key_deletion():
     """Test D (spec §46): a distinctive note survives widget-key removal."""
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     st.session_state.update(
         {
@@ -664,6 +720,8 @@ def test_transfer_measured_mode_survives_switch_away_and_back_with_key_deletion(
     inactive mode's widget key is removed while its widget isn't drawn."""
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     st.session_state.update(
         {
@@ -696,6 +754,8 @@ def test_transfer_rtt_value_survives_disable_and_reenable_with_key_deletion():
     RTT is disabled."""
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     st.session_state.update(
         {
@@ -717,6 +777,178 @@ def test_transfer_rtt_value_survives_disable_and_reenable_with_key_deletion():
     transfer.render()
 
     assert st.session_state["transfer_rtt_ms"] == 137.0
+
+
+# 8b. Real widget-lifecycle "reset to default" regression (spec 014 §26-30) --
+#
+# `_delete_keys()` above simulates a widget key being entirely *absent* --
+# which `sync_widget_defaults()` already handled correctly, so those tests
+# stayed green throughout the actual deployed defect's lifetime. Real
+# Streamlit does something different to a widget whose key is not
+# instantiated on a run: the key stays *present*, but its value silently
+# resets to the widget's own declared default (confirmed by live
+# reproduction against a real streamlit.testing.v1.AppTest run -- see the
+# root-cause comment in views/transfer.py). The tests below simulate that
+# actual mechanism and would have caught the deployed 777->0/137->0/
+# note-lost defect that the deletion-based tests above could not.
+
+
+_STREAMLIT_WIDGET_RESET_VALUES = {
+    # What real Streamlit itself resets a not-drawn widget's session-state
+    # value to (its own default arg, since none of these pass an explicit
+    # ``value=``) -- distinct from ``_default_state()``'s healing-seed
+    # values (e.g. transfer_link_capacity_mbps=1000.0), which only apply
+    # when the key is entirely *absent*, not when it is present but reset.
+    "transfer_measured_mbps": 0.0,
+    "transfer_measured_note": "",
+    "transfer_link_capacity_mbps": 0.0,
+    "transfer_efficiency_percent": 0.0,
+    "transfer_rtt_ms": 0.0,
+}
+
+
+def _reset_keys_to_widget_defaults(*keys: str) -> None:
+    for key in keys:
+        st.session_state[key] = _STREAMLIT_WIDGET_RESET_VALUES[key]
+
+
+def test_transfer_measured_mode_survives_switch_away_and_back_with_reset_to_default():
+    """The exact reported defect: 777 Mbps and its note must not reset to
+    0/blank after navigating throughput mode away and back."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_throughput_mode": "measured",
+            "transfer_measured_mbps": 777.0,
+            "transfer_measured_note": "014 persistence test",
+        }
+    )
+    transfer.render()
+
+    st.session_state["transfer_throughput_mode"] = "unknown"
+    transfer.render()
+    _reset_keys_to_widget_defaults("transfer_measured_mbps", "transfer_measured_note")
+
+    st.session_state["transfer_throughput_mode"] = "measured"
+    transfer.render()
+
+    assert st.session_state["transfer_measured_mbps"] == 777.0
+    assert st.session_state["transfer_measured_note"] == "014 persistence test"
+
+
+def test_transfer_rtt_value_survives_disable_and_reenable_with_reset_to_default():
+    """The exact reported defect: RTT must not snap back to 0.00 when
+    disabled and re-enabled."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_rtt_enabled": True,
+            "transfer_rtt_ms": 137.0,
+        }
+    )
+    transfer.render()
+
+    st.session_state["transfer_rtt_enabled"] = False
+    transfer.render()
+    _reset_keys_to_widget_defaults("transfer_rtt_ms")
+
+    st.session_state["transfer_rtt_enabled"] = True
+    transfer.render()
+
+    assert st.session_state["transfer_rtt_ms"] == 137.0
+
+
+def test_transfer_known_capacity_survives_switch_away_and_back_with_reset_to_default():
+    """Same defect class for Known link capacity mode's two fields."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_throughput_mode": "known_capacity",
+            "transfer_link_capacity_mbps": 2500.0,
+            "transfer_efficiency_percent": 63.0,
+        }
+    )
+    transfer.render()
+
+    st.session_state["transfer_throughput_mode"] = "unknown"
+    transfer.render()
+    _reset_keys_to_widget_defaults("transfer_link_capacity_mbps", "transfer_efficiency_percent")
+
+    st.session_state["transfer_throughput_mode"] = "known_capacity"
+    transfer.render()
+
+    assert st.session_state["transfer_link_capacity_mbps"] == 2500.0
+    assert st.session_state["transfer_efficiency_percent"] == 63.0
+
+
+def test_transfer_fields_survive_navigating_away_to_another_page_and_back():
+    """spec 014 §26-31, §80: the exact deployed defect, reproduced live
+    against a real streamlit.testing.v1.AppTest run in this session (not
+    just this module's bare-mode tests) -- navigating away from Transfer to
+    a *different page* (Project Summary here) and back, with the throughput
+    mode never changing, still silently resets every one of Transfer's
+    widgets that Streamlit did not draw on the intervening run(s): measured
+    throughput, its note, both location fields, and RTT. The three tests
+    above only cover a mode switch *within* the Transfer page, which is a
+    narrower trigger than "Transfer's render() did not execute at all this
+    run" -- this test pins the broader page-navigation case that those
+    would not have caught (confirmed by live reproduction: a fix limited to
+    comparing canonical vs current *mode* left this exact scenario broken,
+    since the mode never changes here)."""
+    st.session_state.clear()
+    storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
+    storage.render()
+    st.session_state.update(
+        {
+            "transfer_dataset_choice": "FASTQ",
+            "transfer_throughput_mode": "measured",
+            "transfer_measured_mbps": 777.0,
+            "transfer_measured_note": "014 V1 persistence test",
+            "transfer_source_location": "Cape Town test source",
+            "transfer_destination_location": "AWS Cape Town test destination",
+            "transfer_rtt_enabled": True,
+            "transfer_rtt_ms": 137.0,
+        }
+    )
+    transfer.render()
+
+    # Navigate away: a different page renders, Transfer's own render() does
+    # not execute at all this run. Mode stays "measured" throughout -- only
+    # the page changed.
+    summary.render()
+    _reset_keys_to_widget_defaults(
+        "transfer_measured_mbps", "transfer_measured_note", "transfer_rtt_ms"
+    )
+    st.session_state["transfer_source_location"] = ""
+    st.session_state["transfer_destination_location"] = ""
+
+    # Navigate back to Transfer.
+    transfer.render()
+
+    assert st.session_state["transfer_measured_mbps"] == 777.0
+    assert st.session_state["transfer_measured_note"] == "014 V1 persistence test"
+    assert st.session_state["transfer_source_location"] == "Cape Town test source"
+    assert st.session_state["transfer_destination_location"] == "AWS Cape Town test destination"
+    assert st.session_state["transfer_rtt_enabled"] is True
+    assert st.session_state["transfer_rtt_ms"] == 137.0
+    assert transfer_status(get_project_state()) == COMPLETE
 
 
 # 9. Canonical project-state architecture (spec 013) -------------------------
@@ -884,6 +1116,8 @@ def test_summary_render_is_read_only():
 def test_compute_fields_survive_widget_key_deletion():
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     st.session_state.update(
         {
@@ -955,6 +1189,7 @@ def test_full_distinctive_storage_configuration_survives_round_trip():
     st.session_state.clear()
     storage.ensure_project_state()
     st.session_state.update(DISTINCTIVE_STORAGE_FIELDS)
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
 
     compute.render()
@@ -973,6 +1208,7 @@ def test_full_distinctive_storage_configuration_survives_widget_key_deletion():
     st.session_state.clear()
     storage.ensure_project_state()
     st.session_state.update(DISTINCTIVE_STORAGE_FIELDS)
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
 
     _delete_keys(*DISTINCTIVE_STORAGE_FIELDS.keys())
@@ -1029,6 +1265,8 @@ def test_transfer_fresh_visit_is_not_configured_not_complete():
 def test_transfer_becomes_complete_once_measured_throughput_configured():
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     transfer.render()
     state = get_project_state()
@@ -1047,6 +1285,8 @@ def test_navigation_alone_does_not_fabricate_transfer_complete():
     placeholder) is intentional (spec 013a §18), not a status defect."""
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     compute.render()
     transfer.render()
@@ -1068,6 +1308,8 @@ def test_transfer_full_distinctive_configuration_survives_013a_gate_sequence():
     test rather than leaving it unverified."""
     st.session_state.clear()
     storage.ensure_project_state()
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     st.session_state.update(
         {
@@ -1131,8 +1373,15 @@ def test_reset_project_clears_configuration_status_and_results():
 
 
 def test_reset_project_ghost_state_does_not_resurrect_old_values():
-    """spec 013a §43, §66: after New project, no old widget value may
-    reappear, across every page."""
+    """spec 013a §43, §66; spec 014 §41, §88: after New project, no old
+    widget value may reappear. Immediately after reset the project is
+    genuinely unconfigured, so Storage/Compute/Transfer show only their
+    "Configure a project..." guidance (spec 014 §5-§8) and draw no widgets
+    at all -- there is nothing for a ghost value to reappear in yet. The
+    meaningful check is that *reconfiguring* afterwards (here, loading the
+    demo profile, which only sets project-identity/Storage widgets) yields
+    Compute/Transfer's own fresh defaults, not the old distinctive
+    7/13/333/777/137 configuration."""
     st.session_state.clear()
     _configure_full_project_for_reset_tests()
 
@@ -1142,9 +1391,20 @@ def test_reset_project_ghost_state_does_not_resurrect_old_values():
     compute.render()
     transfer.render()
     summary.render()
-    storage.render()
 
     assert st.session_state["num_samples"] == 1
+    with pytest.raises(KeyError):
+        st.session_state["compute_alignment_concurrency"]  # Compute never drew its widgets
+
+    storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
+    storage.render()
+    compute.render()
+    transfer.render()
+    summary.render()
+    storage.render()
+
+    assert st.session_state["num_samples"] == 500
     assert st.session_state["compute_alignment_concurrency"] == 10
     assert st.session_state["compute_deepvariant_concurrency"] == 10
     assert st.session_state["transfer_measured_mbps"] == 0.0
@@ -1160,6 +1420,7 @@ def test_reset_project_then_load_example_reproduces_clean_demo():
     project_setup.reset_project()
 
     storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
 
     assert st.session_state["project_name"] == "Example WGS Project"
@@ -1175,6 +1436,7 @@ def test_load_example_then_reset_project_leaves_fresh_state():
     st.session_state.clear()
     storage.ensure_project_state()
     storage.load_demo_profile()
+    storage.refresh_current_estimate(get_project_state())
     storage.render()
     assert get_project_state().project_configured is True
 
